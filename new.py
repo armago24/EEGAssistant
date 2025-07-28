@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Fixed visualizer for your Muse device
+Fixed visualizer for your Muse device with Spectral Analysis
 Handles the specific packet format: no leading /, 6 EEG values with 2 NaN, etc.
 """
 
@@ -10,6 +10,7 @@ import threading
 import time
 import numpy as np
 from collections import deque
+from scipy import signal
 import matplotlib
 try:
     matplotlib.use('TkAgg')  # Use TkAgg backend for better rendering
@@ -62,6 +63,7 @@ class MuseFixedVisualizer:
         self.fig = None
         self.axes = {}
         self.lines = {}
+        self.spectral_lines = {}
         
         # Color schemes
         self.eeg_colors = {
@@ -70,6 +72,18 @@ class MuseFixedVisualizer:
             'AF8': '#45B7D1',
             'TP10': '#96CEB4'
         }
+        
+        # Spectral analysis parameters
+        self.sample_rate = 256  # Muse EEG sample rate
+        self.spectral_window_size = 512  # FFT window size
+        self.freq_bands = {
+            'Delta': (0.5, 4),
+            'Theta': (4, 8),
+            'Alpha': (8, 13),
+            'Beta': (13, 30),
+            'Gamma': (30, 50)
+        }
+        self.max_freq = 70  # Maximum frequency to display
         
         # Stats
         self.packet_count = 0
@@ -198,23 +212,24 @@ class MuseFixedVisualizer:
         """Setup matplotlib figure and axes"""
         plt.style.use('dark_background')
         
-        self.fig = plt.figure(figsize=(15, 10))
+        self.fig = plt.figure(figsize=(18, 12))
         self.fig.patch.set_facecolor('#0a0a0a')
         
-        # Create grid: 4 rows for different data types
-        gs = GridSpec(4, 2, figure=self.fig, 
-                     height_ratios=[3, 2, 2, 1],
+        # Create grid: 5 rows for different data types (added spectral)
+        gs = GridSpec(5, 2, figure=self.fig, 
+                     height_ratios=[3, 3, 2, 2, 1],
                      width_ratios=[4, 1],
                      hspace=0.3)
         
         # Main plots
         self.axes['eeg'] = self.fig.add_subplot(gs[0, 0])
-        self.axes['ppg'] = self.fig.add_subplot(gs[1, 0])
-        self.axes['motion'] = self.fig.add_subplot(gs[2, 0])
-        self.axes['ref'] = self.fig.add_subplot(gs[3, 0])
+        self.axes['spectral'] = self.fig.add_subplot(gs[1, 0])
+        self.axes['ppg'] = self.fig.add_subplot(gs[2, 0])
+        self.axes['motion'] = self.fig.add_subplot(gs[3, 0])
+        self.axes['ref'] = self.fig.add_subplot(gs[4, 0])
         
         # Info panel
-        self.axes['info'] = self.fig.add_subplot(gs[:3, 1])
+        self.axes['info'] = self.fig.add_subplot(gs[:4, 1])
         
         # Configure axes
         for name, ax in self.axes.items():
@@ -226,6 +241,10 @@ class MuseFixedVisualizer:
         # Titles and labels
         self.axes['eeg'].set_title('EEG Channels (4 active channels)', fontsize=14, color='#4ECDC4', pad=10)
         self.axes['eeg'].set_ylabel('Amplitude (μV)')
+        
+        self.axes['spectral'].set_title('Spectral Analysis - Power Spectral Density', fontsize=14, color='#FFD93D', pad=10)
+        self.axes['spectral'].set_ylabel('Power (dB)')
+        self.axes['spectral'].set_xlabel('Frequency (Hz)')
         
         self.axes['ppg'].set_title('PPG (Photoplethysmography)', fontsize=14, color='#FF6B6B', pad=10)
         self.axes['ppg'].set_ylabel('Intensity')
@@ -259,6 +278,34 @@ class MuseFixedVisualizer:
                                          antialiased=True)  # Smooth lines with anti-aliasing
             self.lines[f'eeg_{ch}'] = line
         
+        # Initialize spectral plot
+        # Create lines for spectral analysis - one for each channel
+        self.spectral_lines = {}
+        for ch, color in self.eeg_colors.items():
+            line, = self.axes['spectral'].plot([], [], label=ch, color=color, 
+                                              linewidth=1.5, alpha=0.9,
+                                              antialiased=True)
+            self.spectral_lines[ch] = line
+        
+        # Set up spectral axis
+        self.axes['spectral'].set_xlim(0, self.max_freq)  # 0-70 Hz
+        self.axes['spectral'].set_ylabel('Power (dB)')
+        self.axes['spectral'].set_xlabel('Frequency (Hz)')
+        
+        # Add frequency band labels as vertical lines
+        for band_name, (low, high) in self.freq_bands.items():
+            self.axes['spectral'].axvline(x=low, color='white', linestyle=':', alpha=0.3, linewidth=0.5)
+            mid_freq = (low + high) / 2
+            if mid_freq < self.max_freq:
+                self.axes['spectral'].text(mid_freq, 0.98, band_name, 
+                                         fontsize=8, color='white', alpha=0.7,
+                                         horizontalalignment='center',
+                                         verticalalignment='top',
+                                         transform=self.axes['spectral'].get_xaxis_transform())
+        
+        # Add legend for spectral plot
+        self.axes['spectral'].legend(loc='upper right', fontsize=8, ncol=4, framealpha=0.7)
+        
         # Single PPG line
         line, = self.axes['ppg'].plot([], [], label='PPG', 
                                      color='#E74C3C',
@@ -288,18 +335,42 @@ class MuseFixedVisualizer:
         self.axes['motion'].legend(loc='upper right', fontsize=8, ncol=3, framealpha=0.5)
         self.axes['ref'].legend(loc='upper right', fontsize=8, ncol=2, framealpha=0.5)
     
+    def compute_spectrum(self, data, sample_rate=256):
+        """Compute power spectral density using Welch's method"""
+        if len(data) < self.spectral_window_size:
+            return None, None
+        
+        # Use Welch's method for more stable spectrum estimation
+        frequencies, psd = signal.welch(
+            data, 
+            fs=sample_rate, 
+            nperseg=min(len(data), self.spectral_window_size),
+            noverlap=min(len(data)//2, self.spectral_window_size//2),
+            scaling='density'
+        )
+        
+        # Limit to 0-70 Hz
+        freq_mask = frequencies <= self.max_freq
+        frequencies = frequencies[freq_mask]
+        psd = psd[freq_mask]
+        
+        # Convert to dB
+        psd_db = 10 * np.log10(psd + 1e-10)
+        
+        return frequencies, psd_db
+    
     def update_plot(self, frame):
         """Update all plots with latest data"""
         with self.lock:
             if len(self.timestamps) < 2:
-                return list(self.lines.values())
+                return list(self.lines.values()) + list(self.spectral_lines.values())
             
             # Get the minimum length across all EEG channels to ensure alignment
             min_eeg_length = min(len(self.eeg_channels[ch]) for ch in self.eeg_channels 
                                if len(self.eeg_channels[ch]) > 0)
             
             if min_eeg_length < 2:
-                return list(self.lines.values())
+                return list(self.lines.values()) + list(self.spectral_lines.values())
             
             # Calculate time axis based on actual timestamps
             timestamps = np.array(list(self.timestamps)[-min_eeg_length:])
@@ -311,11 +382,14 @@ class MuseFixedVisualizer:
                 display_mask = time_axis >= -self.window_duration
                 display_samples = np.sum(display_mask)
             else:
-                return list(self.lines.values())
+                return list(self.lines.values()) + list(self.spectral_lines.values())
             
             # Update EEG with proper alignment and channel separation
             eeg_values_for_scaling = []
             channel_offsets = {'TP9': 0, 'AF7': 1, 'AF8': 2, 'TP10': 3}  # Vertical offsets
+            
+            # Store filtered data for spectral analysis
+            filtered_eeg_data = {}
             
             for ch_name in ['TP9', 'AF7', 'AF8', 'TP10']:  # Fixed order
                 if ch_name in self.eeg_channels and len(self.eeg_channels[ch_name]) >= min_eeg_length:
@@ -342,16 +416,39 @@ class MuseFixedVisualizer:
                             # For short data, just remove mean
                             filtered_data = data_array - np.mean(data_array)
                         
+                        # Store for spectral analysis
+                        filtered_eeg_data[ch_name] = filtered_data
+                        
                         # Apply display mask
                         display_time = time_axis[display_mask]
                         display_data = filtered_data[display_mask]
                         
-                        # Add channel offset for separation (optional - comment out for overlapped view)
-                        # offset = channel_offsets[ch_name] * 50  # 50 μV separation
-                        # display_data = display_data + offset
-                        
                         self.lines[line_key].set_data(display_time, display_data)
                         eeg_values_for_scaling.extend(display_data)
+            
+            # Update spectral analysis
+            if len(filtered_eeg_data) == 4:
+                all_psd_values = []
+                
+                for ch_name in ['TP9', 'AF7', 'AF8', 'TP10']:
+                    if ch_name in filtered_eeg_data and ch_name in self.spectral_lines:
+                        # Use last few seconds of data for spectral analysis
+                        spectral_window_samples = min(len(filtered_eeg_data[ch_name]), 
+                                                    int(self.sample_rate * 4))  # 4 seconds
+                        data_for_spectrum = filtered_eeg_data[ch_name][-spectral_window_samples:]
+                        
+                        frequencies, psd = self.compute_spectrum(data_for_spectrum, self.sample_rate)
+                        
+                        if frequencies is not None and psd is not None:
+                            # Update the spectral line for this channel
+                            self.spectral_lines[ch_name].set_data(frequencies, psd)
+                            all_psd_values.extend(psd)
+                
+                # Auto-scale y-axis based on all channels
+                if all_psd_values:
+                    y_min = np.percentile(all_psd_values, 5) - 5
+                    y_max = np.percentile(all_psd_values, 95) + 5
+                    self.axes['spectral'].set_ylim(y_min, y_max)
             
             # Update PPG with same time alignment
             if 'PPG' in self.ppg_channels and len(self.ppg_channels['PPG']) > 0:
@@ -417,7 +514,7 @@ class MuseFixedVisualizer:
             # Update info panel
             self._update_info_panel()
         
-        return list(self.lines.values())
+        return list(self.lines.values()) + list(self.spectral_lines.values())
 
     
     def _update_info_panel(self):
@@ -453,6 +550,39 @@ class MuseFixedVisualizer:
                                      fontsize=9, color='white',
                                      transform=self.axes['info'].transAxes)
                 y_pos -= 0.04
+        
+        # Frequency band power
+        y_pos -= 0.04
+        self.axes['info'].text(0.1, y_pos, 'Band Power:', fontsize=10,
+                             weight='bold', color='#FFD93D',
+                             transform=self.axes['info'].transAxes)
+        y_pos -= 0.05
+        
+        # Calculate average band powers from spectral lines if available
+        if hasattr(self, 'spectral_lines'):
+            band_powers = {band: [] for band in self.freq_bands.keys()}
+            
+            for ch_name, line in self.spectral_lines.items():
+                xdata, ydata = line.get_data()
+                if len(xdata) > 0 and len(ydata) > 0:
+                    for band_name, (low, high) in self.freq_bands.items():
+                        band_mask = (xdata >= low) & (xdata <= high)
+                        if np.any(band_mask):
+                            # Calculate average power in band
+                            band_power = np.mean(ydata[band_mask])
+                            band_powers[band_name].append(band_power)
+            
+            # Display average band powers across all channels
+            for band_name in self.freq_bands.keys():
+                if band_powers[band_name]:
+                    avg_power = np.mean(band_powers[band_name])
+                    self.axes['info'].text(0.15, y_pos, f'{band_name}:', fontsize=9,
+                                         color='white',
+                                         transform=self.axes['info'].transAxes)
+                    self.axes['info'].text(0.4, y_pos, f'{avg_power:.1f} dB',
+                                         fontsize=9, color='white',
+                                         transform=self.axes['info'].transAxes)
+                    y_pos -= 0.04
         
         # PPG stats
         y_pos -= 0.04
@@ -496,7 +626,7 @@ class MuseFixedVisualizer:
     
     def start(self):
         """Start the visualizer"""
-        print("Starting Fixed Muse Visualizer...")
+        print("Starting Fixed Muse Visualizer with Spectral Analysis...")
         print(f"Listening for OSC data on UDP port {self.port}")
         print("\nExpected data format:")
         print("  - EEG: 4 channels from 6 values (last 2 are NaN)")
@@ -505,6 +635,13 @@ class MuseFixedVisualizer:
         print("\nNOTE: EEG signals use high-pass filtering to remove DC offset")
         print("      Raw values (~600-800 μV) are shown in stats panel")
         print("      Displayed signals show variations around baseline")
+        print("\nSpectral Analysis shows frequency content of EEG signals (0-70 Hz):")
+        print("  - Delta (0.5-4 Hz): Deep sleep")
+        print("  - Theta (4-8 Hz): Drowsiness, meditation")
+        print("  - Alpha (8-13 Hz): Relaxed, eyes closed")
+        print("  - Beta (13-30 Hz): Active thinking, focus")
+        print("  - Gamma (30-50 Hz): High-level cognitive processing")
+        print("  - High Gamma (50-70 Hz): Very high frequency activity")
         
         # Start UDP receiver
         try:

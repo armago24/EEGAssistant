@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import numpy as np
 from collections import deque
-from manualoscparser import EEGfNIRSParser
+from AthenaParserConsole import EEGfNIRSParser
 import time
 from matplotlib.gridspec import GridSpec
 

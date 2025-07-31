@@ -19,6 +19,12 @@ except:
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from matplotlib.gridspec import GridSpec
+from matplotlib.widgets import Button
+import json
+import os
+from datetime import datetime
+from tkinter import filedialog, messagebox
+import tkinter as tk
 
 class MuseFixedVisualizer:
     def __init__(self, port=8052, buffer_size=2000, window_duration=10):
@@ -89,6 +95,18 @@ class MuseFixedVisualizer:
         self.packet_count = 0
         self.eeg_packet_count = 0
         self.show_filtered = True  # Toggle for filtered vs raw EEG
+        
+        # Recording functionality
+        self.is_recording = False
+        self.recording_start_time = None
+        self.recorded_data = {
+            'eeg': [],
+            'ppg': [],
+            'motion': [],
+            'ref': [],
+            'events': []
+        }
+        self.record_button = None
         
     def parse_osc_string(self, data, offset):
         """Parse null-terminated, 4-byte aligned string from OSC data"""
@@ -169,6 +187,16 @@ class MuseFixedVisualizer:
                             self.eeg_channels[ch].append(val)
                         self.eeg_packet_count += 1
                         
+                        # Record data if recording
+                        if self.is_recording:
+                            self.recorded_data['eeg'].append({
+                                'timestamp': timestamp,
+                                'TP9': args[0],
+                                'AF7': args[1],
+                                'AF8': args[2],
+                                'TP10': args[3]
+                            })
+                        
                         # Debug first few packets
                         if self.eeg_packet_count <= 5:
                             print(f"EEG packet {self.eeg_packet_count}: {args}")
@@ -178,17 +206,41 @@ class MuseFixedVisualizer:
                     # args should have filtered out the NaN values
                     if len(args) > 0:
                         self.ppg_channels['PPG'].append(args[0])
+                        
+                        # Record data if recording
+                        if self.is_recording:
+                            self.recorded_data['ppg'].append({
+                                'timestamp': timestamp,
+                                'value': args[0]
+                            })
                 
                 # Accelerometer data
                 elif data_type == 'acc' and len(args) == 3:
                     channels = ['acc_x', 'acc_y', 'acc_z']
                     for ch, val in zip(channels, args):
                         self.motion_channels[ch].append(val)
+                    
+                    # Record data if recording
+                    if self.is_recording:
+                        self.recorded_data['motion'].append({
+                            'timestamp': timestamp,
+                            'x': args[0],
+                            'y': args[1],
+                            'z': args[2]
+                        })
                 
                 # DRL/REF data
                 elif data_type == 'drlref' and len(args) >= 2:
                     self.ref_channels['DRL'].append(args[0])
                     self.ref_channels['REF'].append(args[1])
+                    
+                    # Record data if recording
+                    if self.is_recording:
+                        self.recorded_data['ref'].append({
+                            'timestamp': timestamp,
+                            'DRL': args[0],
+                            'REF': args[1]
+                        })
     
     def receiver_loop(self):
         """Main UDP receiver loop"""
@@ -263,10 +315,109 @@ class MuseFixedVisualizer:
             spine.set_visible(False)
         self.axes['info'].set_title('Signal Statistics', fontsize=14, color='#FFD93D', pad=10)
         
+        # Add record button
+        ax_button = plt.axes([0.02, 0.95, 0.08, 0.04])
+        self.record_button = Button(ax_button, 'Start Recording', 
+                                   color='#2a2a2a', hovercolor='#3a3a3a')
+        self.record_button.on_clicked(self.toggle_recording)
+        
         # Initialize plot lines
         self._initialize_lines()
         
         plt.tight_layout()
+    
+    def toggle_recording(self, event):
+        """Toggle recording state"""
+        with self.lock:
+            if not self.is_recording:
+                # Start recording
+                self.is_recording = True
+                self.recording_start_time = time.time()
+                self.recorded_data = {
+                    'eeg': [],
+                    'ppg': [],
+                    'motion': [],
+                    'ref': [],
+                    'events': [],
+                    'metadata': {
+                        'start_time': self.recording_start_time,
+                        'sample_rate': self.sample_rate
+                    }
+                }
+                self.record_button.label.set_text('Stop Recording')
+                self.record_button.color = '#ff4444'
+                self.record_button.hovercolor = '#ff6666'
+                print(f"\nRecording started at {datetime.fromtimestamp(self.recording_start_time).strftime('%Y-%m-%d %H:%M:%S')}")
+                print("Press 'c' for confused, 'o' for overwhelmed, 'd' for dictionary")
+            else:
+                # Stop recording
+                self.is_recording = False
+                self.record_button.label.set_text('Start Recording')
+                self.record_button.color = '#2a2a2a'
+                self.record_button.hovercolor = '#3a3a3a'
+                print(f"\nRecording stopped. Duration: {time.time() - self.recording_start_time:.1f}s")
+                print(f"Events recorded: {len(self.recorded_data['events'])}")
+    
+    def record_event(self, event_type):
+        """Record an event with timestamp"""
+        if self.is_recording:
+            timestamp = time.time()
+            event = {
+                'timestamp': timestamp,
+                'type': event_type,
+                'relative_time': timestamp - self.recording_start_time
+            }
+            self.recorded_data['events'].append(event)
+            print(f"Event recorded: {event_type} at {event['relative_time']:.2f}s")
+    
+    def save_recording(self):
+        """Save the recorded data to a file"""
+        if not self.recorded_data['eeg'] and not self.recorded_data['events']:
+            return
+        
+        # Create Tkinter root window (hidden)
+        root = tk.Tk()
+        root.withdraw()
+        
+        # Ask for filename
+        default_name = f"muse_recording_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        filename = filedialog.asksaveasfilename(
+            initialdir=os.path.expanduser("~/Downloads"),
+            initialfile=default_name,
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+        )
+        
+        if filename:
+            # Update metadata
+            self.recorded_data['metadata']['end_time'] = time.time()
+            self.recorded_data['metadata']['duration'] = (
+                self.recorded_data['metadata']['end_time'] - 
+                self.recorded_data['metadata']['start_time']
+            )
+            self.recorded_data['metadata']['total_eeg_samples'] = len(self.recorded_data['eeg'])
+            self.recorded_data['metadata']['total_events'] = len(self.recorded_data['events'])
+            
+            # Save to file
+            with open(filename, 'w') as f:
+                json.dump(self.recorded_data, f, indent=2)
+            
+            print(f"\nRecording saved to: {filename}")
+            print(f"Total EEG samples: {len(self.recorded_data['eeg'])}")
+            print(f"Total events: {len(self.recorded_data['events'])}")
+            
+            # Show summary of events
+            event_counts = {}
+            for event in self.recorded_data['events']:
+                event_type = event['type']
+                event_counts[event_type] = event_counts.get(event_type, 0) + 1
+            
+            if event_counts:
+                print("\nEvent summary:")
+                for event_type, count in event_counts.items():
+                    print(f"  {event_type}: {count}")
+        
+        root.destroy()
     
     def _initialize_lines(self):
         """Initialize all plot lines"""
@@ -530,6 +681,18 @@ class MuseFixedVisualizer:
                              fontsize=12, weight='bold', color='#FFD93D',
                              transform=self.axes['info'].transAxes)
         
+        # Recording status
+        if self.is_recording:
+            y_pos -= 0.06
+            elapsed = time.time() - self.recording_start_time
+            self.axes['info'].text(0.1, y_pos, f'Recording: {elapsed:.1f}s', 
+                                 fontsize=10, color='#ff4444', weight='bold',
+                                 transform=self.axes['info'].transAxes)
+            y_pos -= 0.04
+            self.axes['info'].text(0.1, y_pos, f'Events: {len(self.recorded_data["events"])}', 
+                                 fontsize=9, color='#ff6666',
+                                 transform=self.axes['info'].transAxes)
+        
         # EEG stats
         y_pos -= 0.08
         self.axes['info'].text(0.1, y_pos, 'EEG (4ch):', fontsize=10, 
@@ -685,8 +848,32 @@ class MuseFixedVisualizer:
                         ch.clear()
                     self.timestamps.clear()
                 print("Buffers reset")
+            elif event.key == 'c':
+                self.record_event('confused')
+            elif event.key == 'o':
+                self.record_event('overwhelmed')
+            elif event.key == 'd':
+                self.record_event('dictionary')
         
         self.fig.canvas.mpl_connect('key_press_event', on_key)
+        
+        # Handle window close event
+        def on_close(event):
+            if self.is_recording and (self.recorded_data['eeg'] or self.recorded_data['events']):
+                # Stop recording if still active
+                self.is_recording = False
+                
+                # Ask if user wants to save
+                root = tk.Tk()
+                root.withdraw()
+                result = messagebox.askyesno("Save Recording?", 
+                                           "Do you want to save the recording?")
+                root.destroy()
+                
+                if result:
+                    self.save_recording()
+        
+        self.fig.canvas.mpl_connect('close_event', on_close)
         
         # Start animation
         self.animation = animation.FuncAnimation(
@@ -701,7 +888,11 @@ class MuseFixedVisualizer:
         print("\nKeyboard shortcuts:")
         print("  '+'/'-' : Increase/decrease time window")
         print("  'r'     : Reset buffers")
+        print("  'c'     : Mark confused event")
+        print("  'o'     : Mark overwhelmed event")
+        print("  'd'     : Mark dictionary event")
         print("  'q'     : Quit")
+        print("\nClick 'Start Recording' button to begin recording session")
         
         try:
             plt.show()

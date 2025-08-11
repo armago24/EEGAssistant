@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Visualizer for Muse S Athena with EEG and fNIRS (optics) data
-Adapted for the specific Athena packet format
+Modified for ML training with confusion detection
+Saves data as NPZ files with event timestamps
 """
 
 import socket
@@ -25,6 +26,9 @@ import os
 from datetime import datetime
 from tkinter import filedialog, messagebox
 import tkinter as tk
+import signal as sig
+import atexit
+import sys
 
 class MuseAthenaVisualizer:
     def __init__(self, port=8052, buffer_size=2000, window_duration=10):
@@ -47,7 +51,6 @@ class MuseAthenaVisualizer:
         }
         
         # fNIRS/Optics channels - 8 values
-        # First 4 appear to be normalized intensities, last 4 raw readings
         self.fnirs_channels = {
             'Ch1_norm': deque(maxlen=buffer_size),
             'Ch2_norm': deque(maxlen=buffer_size),
@@ -114,18 +117,64 @@ class MuseAthenaVisualizer:
         self.eeg_packet_count = 0
         self.fnirs_packet_count = 0
         
-        # Recording functionality
+        # Recording functionality - optimized for performance
         self.is_recording = False
         self.recording_start_time = None
-        self.recorded_data = {
-            'eeg': [],
-            'fnirs': [],
-            'motion': [],
-            'ref': [],
-            'events': []
-        }
         self.record_button = None
         
+        # Data storage for ML - using regular lists for efficiency
+        # Lists are faster than deques for our append-only use case
+        self.recorded_timestamps = []
+        self.recorded_eeg = []
+        self.recorded_fnirs = []
+        self.recorded_motion = []
+        self.recorded_ref = []
+        self.recorded_events = []  # List of (timestamp, event_type) tuples
+        
+        # For tracking the last saved data
+        self.last_eeg_data = None
+        self.last_fnirs_data = None
+        self.last_motion_data = None
+        self.last_ref_data = None
+        
+        # Flag to track if we're in the process of shutting down
+        self.shutting_down = False
+        
+        # Register cleanup handlers
+        atexit.register(self.cleanup_on_exit)
+        sig.signal(sig.SIGINT, self.signal_handler)
+        
+    def signal_handler(self, signum, frame):
+        """Handle Ctrl+C gracefully"""
+        print("\n\nReceived interrupt signal. Saving data if recording...")
+        self.cleanup_on_exit()
+        sys.exit(0)
+    
+    def cleanup_on_exit(self):
+        """Cleanup function called on exit"""
+        if self.shutting_down:
+            return
+        self.shutting_down = True
+        
+        if self.is_recording and len(self.recorded_timestamps) > 0:
+            print("\nRecording in progress. Auto-saving data...")
+            # Prepare data for auto-save
+            save_data = {
+                'timestamps': self.recorded_timestamps,
+                'eeg': self.recorded_eeg,
+                'fnirs': self.recorded_fnirs,
+                'motion': self.recorded_motion,
+                'ref': self.recorded_ref,
+                'events': self.recorded_events,
+                'start_time': self.recording_start_time
+            }
+            # Auto-save synchronously since we're exiting
+            self.save_recording_npz(auto_save=True)
+        
+        self.running = False
+        if self.socket:
+            self.socket.close()
+    
     def parse_osc_string(self, data, offset):
         """Parse null-terminated, 4-byte aligned string from OSC data"""
         end = data.find(b'\x00', offset)
@@ -201,15 +250,19 @@ class MuseAthenaVisualizer:
                         self.eeg_channels[ch].append(val)
                     self.eeg_packet_count += 1
                     
-                    # Record data if recording
+                    # Store for recording
+                    self.last_eeg_data = args
+                    
+                    # Record data if recording - simplified for performance
                     if self.is_recording:
-                        self.recorded_data['eeg'].append({
-                            'timestamp': timestamp,
-                            'TP9': args[0],
-                            'AF7': args[1],
-                            'AF8': args[2],
-                            'TP10': args[3]
-                        })
+                        # Only append essential data
+                        self.recorded_timestamps.append(timestamp)
+                        self.recorded_eeg.append(args)
+                        
+                        # Append last known values for other channels
+                        self.recorded_fnirs.append(self.last_fnirs_data if self.last_fnirs_data else [np.nan] * 8)
+                        self.recorded_motion.append(self.last_motion_data if self.last_motion_data else [np.nan] * 6)
+                        self.recorded_ref.append(self.last_ref_data if self.last_ref_data else [np.nan] * 2)
                     
                     # Debug first few packets
                     if self.eeg_packet_count <= 5:
@@ -217,8 +270,6 @@ class MuseAthenaVisualizer:
                 
                 # fNIRS/Optics data - 8 floats
                 elif data_type == 'optics' and len(args) == 8:
-                    # First 4 values appear to be normalized (0-1 range)
-                    # Last 4 values appear to be raw sensor readings
                     norm_channels = ['Ch1_norm', 'Ch2_norm', 'Ch3_norm', 'Ch4_norm']
                     raw_channels = ['Ch1_raw', 'Ch2_raw', 'Ch3_raw', 'Ch4_raw']
                     
@@ -226,14 +277,7 @@ class MuseAthenaVisualizer:
                         self.fnirs_channels[ch].append(val)
                     
                     self.fnirs_packet_count += 1
-                    
-                    # Record data if recording
-                    if self.is_recording:
-                        self.recorded_data['fnirs'].append({
-                            'timestamp': timestamp,
-                            'normalized': args[:4],
-                            'raw': args[4:]
-                        })
+                    self.last_fnirs_data = args
                     
                     # Debug first few packets
                     if self.fnirs_packet_count <= 5:
@@ -245,15 +289,10 @@ class MuseAthenaVisualizer:
                     for ch, val in zip(channels, args):
                         self.motion_channels[ch].append(val)
                     
-                    # Record data if recording
-                    if self.is_recording:
-                        self.recorded_data['motion'].append({
-                            'timestamp': timestamp,
-                            'type': 'acc',
-                            'x': args[0],
-                            'y': args[1],
-                            'z': args[2]
-                        })
+                    # Update last motion data (first 3 values)
+                    if self.last_motion_data is None:
+                        self.last_motion_data = [0, 0, 0, 0, 0, 0]
+                    self.last_motion_data[:3] = args
                 
                 # Gyroscope data
                 elif data_type == 'gyro' and len(args) == 3:
@@ -261,28 +300,16 @@ class MuseAthenaVisualizer:
                     for ch, val in zip(channels, args):
                         self.motion_channels[ch].append(val)
                     
-                    # Record data if recording
-                    if self.is_recording:
-                        self.recorded_data['motion'].append({
-                            'timestamp': timestamp,
-                            'type': 'gyro',
-                            'x': args[0],
-                            'y': args[1],
-                            'z': args[2]
-                        })
+                    # Update last motion data (last 3 values)
+                    if self.last_motion_data is None:
+                        self.last_motion_data = [0, 0, 0, 0, 0, 0]
+                    self.last_motion_data[3:] = args
                 
                 # DRL/REF data
                 elif data_type == 'drlref' and len(args) >= 2:
                     self.ref_channels['DRL'].append(args[0])
                     self.ref_channels['REF'].append(args[1])
-                    
-                    # Record data if recording
-                    if self.is_recording:
-                        self.recorded_data['ref'].append({
-                            'timestamp': timestamp,
-                            'DRL': args[0],
-                            'REF': args[1]
-                        })
+                    self.last_ref_data = args[:2]
     
     def receiver_loop(self):
         """Main UDP receiver loop"""
@@ -363,7 +390,7 @@ class MuseAthenaVisualizer:
         
         # Add record button
         ax_button = plt.axes([0.02, 0.95, 0.08, 0.04])
-        self.record_button = Button(ax_button, 'Start Recording', 
+        self.record_button = Button(ax_button, 'Begin Recording', 
                                    color='#2a2a2a', hovercolor='#3a3a3a')
         self.record_button.on_clicked(self.toggle_recording)
         
@@ -372,101 +399,280 @@ class MuseAthenaVisualizer:
         
         plt.tight_layout()
     
-    def toggle_recording(self, event):
+    def toggle_recording(self, event=None):
         """Toggle recording state"""
-        with self.lock:
-            if not self.is_recording:
-                # Start recording
+        if not self.is_recording:
+            # Start recording
+            with self.lock:
                 self.is_recording = True
                 self.recording_start_time = time.time()
-                self.recorded_data = {
-                    'eeg': [],
-                    'fnirs': [],
-                    'motion': [],
-                    'ref': [],
-                    'events': [],
-                    'metadata': {
-                        'start_time': self.recording_start_time,
-                        'sample_rate': self.sample_rate,
-                        'device': 'Muse S Athena'
-                    }
-                }
+                self.recorded_timestamps = []
+                self.recorded_eeg = []
+                self.recorded_fnirs = []
+                self.recorded_motion = []
+                self.recorded_ref = []
+                self.recorded_events = []
+            
+            if self.record_button:
                 self.record_button.label.set_text('Stop Recording')
                 self.record_button.color = '#ff4444'
                 self.record_button.hovercolor = '#ff6666'
-                print(f"\nRecording started at {datetime.fromtimestamp(self.recording_start_time).strftime('%Y-%m-%d %H:%M:%S')}")
-                print("Press 'c' for confused, 'o' for overwhelmed, 'd' for dictionary")
-            else:
-                # Stop recording
-                self.is_recording = False
-                self.record_button.label.set_text('Start Recording')
-                self.record_button.color = '#2a2a2a'
-                self.record_button.hovercolor = '#3a3a3a'
-                print(f"\nRecording stopped. Duration: {time.time() - self.recording_start_time:.1f}s")
-                print(f"Events recorded: {len(self.recorded_data['events'])}")
+            
+            print(f"\n{'='*50}")
+            print(f"RECORDING STARTED at {datetime.fromtimestamp(self.recording_start_time).strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"{'='*50}")
+            print("\nPress 'c' to mark CONFUSION events")
+            print("Press '1', '2', or '3' for other event markers")
+            print("\nData will be saved as .npz file when recording stops")
+        else:
+            # Stop recording
+            self.is_recording = False
+            
+            # Copy data for saving (do this before updating UI)
+            with self.lock:
+                save_data = {
+                    'timestamps': self.recorded_timestamps.copy(),
+                    'eeg': self.recorded_eeg.copy(),
+                    'fnirs': self.recorded_fnirs.copy(),
+                    'motion': self.recorded_motion.copy(),
+                    'ref': self.recorded_ref.copy(),
+                    'events': self.recorded_events.copy(),
+                    'start_time': self.recording_start_time
+                }
+                data_points = len(self.recorded_timestamps)
+                events_count = len(self.recorded_events)
+            
+            # Update UI immediately
+            if self.record_button:
+                self.record_button.label.set_text('Saving...')
+                self.record_button.color = '#888888'
+                self.record_button.hovercolor = '#888888'
+            
+            duration = time.time() - self.recording_start_time
+            print(f"\n{'='*50}")
+            print(f"RECORDING STOPPED")
+            print(f"Duration: {duration:.1f} seconds")
+            print(f"Data points: {data_points}")
+            print(f"Events marked: {events_count}")
+            print(f"{'='*50}")
+            print("\nPreparing to save...")
+            
+            # Save in a separate thread to avoid blocking
+            save_thread = threading.Thread(
+                target=self._save_recording_thread,
+                args=(save_data,)
+            )
+            save_thread.daemon = True
+            save_thread.start()
     
     def record_event(self, event_type):
         """Record an event with timestamp"""
         if self.is_recording:
             timestamp = time.time()
-            event = {
-                'timestamp': timestamp,
-                'type': event_type,
-                'relative_time': timestamp - self.recording_start_time
-            }
-            self.recorded_data['events'].append(event)
-            print(f"Event recorded: {event_type} at {event['relative_time']:.2f}s")
+            relative_time = timestamp - self.recording_start_time
+            self.recorded_events.append((timestamp, event_type))
+            
+            # Special message for confusion events
+            if event_type.lower() == 'c' or event_type.lower() == 'confusion':
+                print(f"🤔 CONFUSION marked at {relative_time:.2f}s")
+            else:
+                print(f"📍 Event '{event_type}' marked at {relative_time:.2f}s")
     
-    def save_recording(self):
-        """Save the recorded data to a file"""
-        if not self.recorded_data['eeg'] and not self.recorded_data['events']:
-            return
+    def _save_recording_thread(self, save_data):
+        """Save recording in a separate thread to avoid blocking"""
+        try:
+            # Show save dialog in thread-safe way
+            filename = self._get_save_filename()
+            
+            if filename:
+                # Update button to show progress
+                if self.record_button:
+                    self.record_button.label.set_text('Converting...')
+                    plt.draw()  # Force UI update
+                
+                # Convert lists to numpy arrays (this is the slow part)
+                print("Converting data to numpy arrays...")
+                timestamps = np.array(save_data['timestamps'])
+                eeg_data = np.array(save_data['eeg']) if save_data['eeg'] else np.array([])
+                fnirs_data = np.array(save_data['fnirs']) if save_data['fnirs'] else np.array([])
+                motion_data = np.array(save_data['motion']) if save_data['motion'] else np.array([])
+                ref_data = np.array(save_data['ref']) if save_data['ref'] else np.array([])
+                
+                # Convert events
+                if save_data['events']:
+                    event_timestamps = np.array([e[0] for e in save_data['events']])
+                    event_types = np.array([e[1] for e in save_data['events']])
+                else:
+                    event_timestamps = np.array([])
+                    event_types = np.array([])
+                
+                # Calculate relative timestamps
+                relative_timestamps = timestamps - timestamps[0] if len(timestamps) > 0 else np.array([])
+                
+                # Create metadata
+                metadata = {
+                    'device': 'Muse S Athena',
+                    'start_time': float(save_data['start_time']),
+                    'end_time': float(timestamps[-1] if len(timestamps) > 0 else save_data['start_time']),
+                    'duration': float(timestamps[-1] - timestamps[0] if len(timestamps) > 0 else 0),
+                    'sample_rate': self.sample_rate,
+                    'total_samples': len(timestamps),
+                    'total_events': len(save_data['events']),
+                    'eeg_channels': ['TP9', 'AF7', 'AF8', 'TP10'],
+                    'fnirs_channels': ['Ch1_norm', 'Ch2_norm', 'Ch3_norm', 'Ch4_norm', 
+                                     'Ch1_raw', 'Ch2_raw', 'Ch3_raw', 'Ch4_raw'],
+                    'motion_channels': ['acc_x', 'acc_y', 'acc_z', 'gyro_x', 'gyro_y', 'gyro_z'],
+                    'ref_channels': ['DRL', 'REF']
+                }
+                
+                # Update button
+                if self.record_button:
+                    self.record_button.label.set_text('Writing file...')
+                    plt.draw()  # Force UI update
+                
+                print("Saving to file...")
+                # Save as compressed numpy file
+                np.savez_compressed(
+                    filename,
+                    timestamps=timestamps,
+                    relative_timestamps=relative_timestamps,
+                    eeg=eeg_data,
+                    fnirs=fnirs_data,
+                    motion=motion_data,
+                    ref=ref_data,
+                    event_timestamps=event_timestamps,
+                    event_types=event_types,
+                    metadata=metadata
+                )
+                
+                print(f"\n{'='*50}")
+                print(f"✅ DATA SAVED SUCCESSFULLY")
+                print(f"File: {filename}")
+                print(f"Size: {os.path.getsize(filename) / 1024:.1f} KB")
+                print(f"\nContents:")
+                print(f"  - {len(timestamps)} timestamped samples")
+                print(f"  - EEG data: {eeg_data.shape if eeg_data.size > 0 else 'None'}")
+                print(f"  - fNIRS data: {fnirs_data.shape if fnirs_data.size > 0 else 'None'}")
+                print(f"  - Motion data: {motion_data.shape if motion_data.size > 0 else 'None'}")
+                print(f"  - Reference data: {ref_data.shape if ref_data.size > 0 else 'None'}")
+                print(f"  - {len(event_timestamps)} events marked")
+                
+                if len(event_timestamps) > 0:
+                    print(f"\nEvent Summary:")
+                    unique_events, counts = np.unique(event_types, return_counts=True)
+                    for event, count in zip(unique_events, counts):
+                        if event.lower() == 'c' or event.lower() == 'confusion':
+                            print(f"  🤔 Confusion: {count} times")
+                        else:
+                            print(f"  📍 Event '{event}': {count} times")
+                
+                print(f"\nTo load this data:")
+                print(f"  data = np.load('{os.path.basename(filename)}')")
+                print(f"  eeg = data['eeg']")
+                print(f"  events = data['event_timestamps']")
+                print(f"{'='*50}\n")
+            else:
+                print("Save cancelled")
         
-        # Create Tkinter root window (hidden)
+        except Exception as e:
+            print(f"❌ Error saving data: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        finally:
+            # Reset button state
+            if self.record_button:
+                self.record_button.label.set_text('Begin Recording')
+                self.record_button.color = '#2a2a2a'
+                self.record_button.hovercolor = '#3a3a3a'
+                plt.draw()  # Force final UI update
+    
+    def _get_save_filename(self):
+        """Get save filename using file dialog"""
         root = tk.Tk()
         root.withdraw()
+        root.lift()
+        root.attributes('-topmost', True)
+        root.focus_force()
         
-        # Ask for filename
         default_name = f"muse_athena_recording_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         filename = filedialog.asksaveasfilename(
+            parent=root,
             initialdir=os.path.expanduser("~/Downloads"),
             initialfile=default_name,
-            defaultextension=".json",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+            defaultextension=".npz",
+            filetypes=[("NumPy Compressed", "*.npz"), ("All files", "*.*")]
         )
         
-        if filename:
-            # Update metadata
-            self.recorded_data['metadata']['end_time'] = time.time()
-            self.recorded_data['metadata']['duration'] = (
-                self.recorded_data['metadata']['end_time'] - 
-                self.recorded_data['metadata']['start_time']
-            )
-            self.recorded_data['metadata']['total_eeg_samples'] = len(self.recorded_data['eeg'])
-            self.recorded_data['metadata']['total_fnirs_samples'] = len(self.recorded_data['fnirs'])
-            self.recorded_data['metadata']['total_events'] = len(self.recorded_data['events'])
-            
-            # Save to file
-            with open(filename, 'w') as f:
-                json.dump(self.recorded_data, f, indent=2)
-            
-            print(f"\nRecording saved to: {filename}")
-            print(f"Total EEG samples: {len(self.recorded_data['eeg'])}")
-            print(f"Total fNIRS samples: {len(self.recorded_data['fnirs'])}")
-            print(f"Total events: {len(self.recorded_data['events'])}")
-            
-            # Show summary of events
-            event_counts = {}
-            for event in self.recorded_data['events']:
-                event_type = event['type']
-                event_counts[event_type] = event_counts.get(event_type, 0) + 1
-            
-            if event_counts:
-                print("\nEvent summary:")
-                for event_type, count in event_counts.items():
-                    print(f"  {event_type}: {count}")
-        
         root.destroy()
+        return filename
+    
+    def save_recording_npz(self, auto_save=False):
+        """Save the recorded data to NPZ file (for auto-save)"""
+        if len(self.recorded_timestamps) == 0:
+            print("No data to save")
+            return
+        
+        if auto_save:
+            # Prepare data for saving
+            save_data = {
+                'timestamps': self.recorded_timestamps,
+                'eeg': self.recorded_eeg,
+                'fnirs': self.recorded_fnirs,
+                'motion': self.recorded_motion,
+                'ref': self.recorded_ref,
+                'events': self.recorded_events,
+                'start_time': self.recording_start_time
+            }
+            
+            # Auto-save without dialog
+            default_dir = os.path.expanduser("~/Downloads")
+            os.makedirs(default_dir, exist_ok=True)
+            filename = os.path.join(default_dir, 
+                                   f"muse_athena_autosave_{datetime.now().strftime('%Y%m%d_%H%M%S')}.npz")
+            
+            print(f"Auto-saving to: {filename}")
+            
+            # Convert and save
+            timestamps = np.array(save_data['timestamps'])
+            eeg_data = np.array(save_data['eeg']) if save_data['eeg'] else np.array([])
+            fnirs_data = np.array(save_data['fnirs']) if save_data['fnirs'] else np.array([])
+            motion_data = np.array(save_data['motion']) if save_data['motion'] else np.array([])
+            ref_data = np.array(save_data['ref']) if save_data['ref'] else np.array([])
+            
+            if save_data['events']:
+                event_timestamps = np.array([e[0] for e in save_data['events']])
+                event_types = np.array([e[1] for e in save_data['events']])
+            else:
+                event_timestamps = np.array([])
+                event_types = np.array([])
+            
+            relative_timestamps = timestamps - timestamps[0] if len(timestamps) > 0 else np.array([])
+            
+            metadata = {
+                'device': 'Muse S Athena',
+                'start_time': float(save_data['start_time']),
+                'end_time': float(timestamps[-1] if len(timestamps) > 0 else save_data['start_time']),
+                'duration': float(timestamps[-1] - timestamps[0] if len(timestamps) > 0 else 0),
+                'sample_rate': self.sample_rate,
+                'total_samples': len(timestamps),
+                'total_events': len(save_data['events'])
+            }
+            
+            np.savez_compressed(
+                filename,
+                timestamps=timestamps,
+                relative_timestamps=relative_timestamps,
+                eeg=eeg_data,
+                fnirs=fnirs_data,
+                motion=motion_data,
+                ref=ref_data,
+                event_timestamps=event_timestamps,
+                event_types=event_types,
+                metadata=metadata
+            )
+            
+            print(f"Auto-save complete: {filename}")
     
     def _initialize_lines(self):
         """Initialize all plot lines"""
@@ -745,13 +951,29 @@ class MuseAthenaVisualizer:
         if self.is_recording:
             y_pos -= 0.06
             elapsed = time.time() - self.recording_start_time
-            self.axes['info'].text(0.1, y_pos, f'Recording: {elapsed:.1f}s', 
+            self.axes['info'].text(0.1, y_pos, f'🔴 REC: {elapsed:.1f}s', 
                                  fontsize=10, color='#ff4444', weight='bold',
                                  transform=self.axes['info'].transAxes)
             y_pos -= 0.04
-            self.axes['info'].text(0.1, y_pos, f'Events: {len(self.recorded_data["events"])}', 
+            self.axes['info'].text(0.1, y_pos, f'Samples: {len(self.recorded_timestamps)}', 
                                  fontsize=9, color='#ff6666',
                                  transform=self.axes['info'].transAxes)
+            y_pos -= 0.04
+            
+            # Count confusion events
+            confusion_count = sum(1 for _, event_type in self.recorded_events 
+                                if event_type.lower() == 'c' or event_type.lower() == 'confusion')
+            other_count = len(self.recorded_events) - confusion_count
+            
+            self.axes['info'].text(0.1, y_pos, f'🤔 Confusion: {confusion_count}', 
+                                 fontsize=9, color='#ffaa44',
+                                 transform=self.axes['info'].transAxes)
+            y_pos -= 0.04
+            if other_count > 0:
+                self.axes['info'].text(0.1, y_pos, f'📍 Other: {other_count}', 
+                                     fontsize=9, color='#66aaff',
+                                     transform=self.axes['info'].transAxes)
+                y_pos -= 0.04
         
         # EEG stats
         y_pos -= 0.08
@@ -863,26 +1085,35 @@ class MuseAthenaVisualizer:
     
     def start(self):
         """Start the visualizer"""
-        print("Starting Muse S Athena Visualizer with EEG and fNIRS...")
-        print(f"Listening for OSC data on UDP port {self.port}")
-        print("\nDevice: Muse S Athena")
-        print("\nExpected data format:")
-        print("  - EEG: 4 channels (TP9, AF7, AF8, TP10)")
-        print("  - fNIRS/Optics: 8 values (4 normalized + 4 raw)")
-        print("  - Accelerometer: 3 axes")
-        print("  - Gyroscope: 3 axes")
-        print("  - Reference: DRL and REF")
-        print("\nfNIRS Information:")
-        print("  - Functional Near-Infrared Spectroscopy")
-        print("  - Measures hemodynamic responses (blood oxygen levels)")
-        print("  - Normalized values: 0-1 range")
-        print("  - Raw values: sensor readings")
-        print("\nSpectral Analysis shows frequency content of EEG signals (0-70 Hz):")
-        print("  - Delta (0.5-4 Hz): Deep sleep")
-        print("  - Theta (4-8 Hz): Drowsiness, meditation")
-        print("  - Alpha (8-13 Hz): Relaxed, eyes closed")
-        print("  - Beta (13-30 Hz): Active thinking, focus")
-        print("  - Gamma (30-50 Hz): High-level cognitive processing")
+        print("\n" + "="*60)
+        print("   MUSE S ATHENA VISUALIZER - ML DATA COLLECTION MODE")
+        print("="*60)
+        print(f"\n📡 Listening for OSC data on UDP port {self.port}")
+        print("\n🧠 DEVICE: Muse S Athena")
+        print("\n📊 DATA CHANNELS:")
+        print("  • EEG: 4 channels (TP9, AF7, AF8, TP10)")
+        print("  • fNIRS/Optics: 8 values (4 normalized + 4 raw)")
+        print("  • Accelerometer: 3 axes")
+        print("  • Gyroscope: 3 axes")
+        print("  • Reference: DRL and REF")
+        
+        print("\n🎯 CONFUSION DETECTION TRAINING MODE:")
+        print("  1. Click 'Begin Recording' to start data collection")
+        print("  2. Press 'c' whenever you feel confused while studying")
+        print("  3. Data will be saved as .npz file for ML training")
+        print("  4. Auto-saves on Ctrl+C or window close")
+        
+        print("\n⌨️  KEYBOARD SHORTCUTS:")
+        print("  'c'     : Mark CONFUSION (primary event)")
+        print("  '1','2','3' : Mark other events")
+        print("  '+'/'-' : Increase/decrease time window")
+        print("  'r'     : Reset buffers")
+        print("  'q'     : Quit (saves data if recording)")
+        
+        print("\n💾 DATA SAVING:")
+        print("  • Format: NumPy compressed (.npz)")
+        print("  • Auto-saves to ~/Downloads if interrupted")
+        print("  • Contains timestamps, all sensor data, and events")
         
         # Start UDP receiver
         try:
@@ -896,7 +1127,7 @@ class MuseAthenaVisualizer:
             receiver_thread.start()
             
         except Exception as e:
-            print(f"Failed to start receiver: {e}")
+            print(f"❌ Failed to start receiver: {e}")
             return
         
         # Setup visualization
@@ -905,6 +1136,8 @@ class MuseAthenaVisualizer:
         # Keyboard shortcuts
         def on_key(event):
             if event.key == 'q':
+                print("\nQuitting...")
+                self.cleanup_on_exit()
                 plt.close('all')
                 self.stop()
             elif event.key == '+' or event.key == '=':
@@ -926,30 +1159,20 @@ class MuseAthenaVisualizer:
                         ch.clear()
                     self.timestamps.clear()
                 print("Buffers reset")
-            elif event.key == 'c':
-                self.record_event('confused')
-            elif event.key == 'o':
-                self.record_event('overwhelmed')
-            elif event.key == 'd':
-                self.record_event('dictionary')
+            elif event.key == 'c' or event.key == 'C':
+                self.record_event('confusion')
+            elif event.key == '1':
+                self.record_event('1')
+            elif event.key == '2':
+                self.record_event('2')
+            elif event.key == '3':
+                self.record_event('3')
         
         self.fig.canvas.mpl_connect('key_press_event', on_key)
         
         # Handle window close event
         def on_close(event):
-            if self.is_recording and (self.recorded_data['eeg'] or self.recorded_data['events']):
-                # Stop recording if still active
-                self.is_recording = False
-                
-                # Ask if user wants to save
-                root = tk.Tk()
-                root.withdraw()
-                result = messagebox.askyesno("Save Recording?", 
-                                           "Do you want to save the recording?")
-                root.destroy()
-                
-                if result:
-                    self.save_recording()
+            self.cleanup_on_exit()
         
         self.fig.canvas.mpl_connect('close_event', on_close)
         
@@ -961,21 +1184,15 @@ class MuseAthenaVisualizer:
             cache_frame_data=False
         )
         
-        print("\nVisualization started!")
+        print("\n✅ Visualization started!")
         print("First 5 EEG and fNIRS packets will be printed for verification.")
-        print("\nKeyboard shortcuts:")
-        print("  '+'/'-' : Increase/decrease time window")
-        print("  'r'     : Reset buffers")
-        print("  'c'     : Mark confused event")
-        print("  'o'     : Mark overwhelmed event")
-        print("  'd'     : Mark dictionary event")
-        print("  'q'     : Quit")
-        print("\nClick 'Start Recording' button to begin recording session")
+        print("\n" + "="*60)
         
         try:
             plt.show()
         except KeyboardInterrupt:
-            pass
+            print("\nKeyboard interrupt received")
+            self.cleanup_on_exit()
         finally:
             self.stop()
     
@@ -984,10 +1201,12 @@ class MuseAthenaVisualizer:
         self.running = False
         if self.socket:
             self.socket.close()
-        print(f"\nVisualizer stopped")
+        print(f"\n{'='*50}")
+        print(f"VISUALIZER STOPPED")
         print(f"Total packets received: {self.packet_count}")
-        print(f"EEG packets received: {self.eeg_packet_count}")
-        print(f"fNIRS packets received: {self.fnirs_packet_count}")
+        print(f"EEG packets: {self.eeg_packet_count}")
+        print(f"fNIRS packets: {self.fnirs_packet_count}")
+        print(f"{'='*50}\n")
 
 
 if __name__ == "__main__":

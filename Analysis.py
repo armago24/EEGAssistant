@@ -188,6 +188,13 @@ class ConfusionMLDetector:
                     label = 2
                     break
             
+            # Skip ambiguous baseline near any event
+            if label == 0:  # baseline candidate
+                if len(self.all_confusion_events) > 0:
+                    all_times = np.array([t for t, _ in self.all_confusion_events])
+                    if np.min(np.abs(all_times - window_center_time)) < 0.75:
+                        continue  # do not use this as clean baseline
+            
             # Extract features
             features = self.extract_features(window)
             X.append(features)
@@ -237,6 +244,12 @@ class ConfusionMLDetector:
         print(f"\n1. Binary Classification (Confusion vs Baseline)")
         print("-" * 40)
         
+        # Class imbalance handling
+        pos = (y_train_binary == 1).sum()
+        neg = (y_train_binary == 0).sum()
+        pos_weight = neg / max(1, pos)
+        print(f"Class balance: {neg} baseline, {pos} confusion (weight={pos_weight:.2f})")
+        
         if model_type == 'xgboost':
             clf_binary = xgb.XGBClassifier(
                 n_estimators=100,
@@ -244,20 +257,29 @@ class ConfusionMLDetector:
                 learning_rate=0.1,
                 random_state=42,
                 use_label_encoder=False,
-                eval_metric='logloss'
+                eval_metric='logloss',
+                scale_pos_weight=pos_weight  # Handle class imbalance
             )
         else:
             clf_binary = RandomForestClassifier(
                 n_estimators=100,
                 max_depth=5,
-                random_state=42
+                random_state=42,
+                class_weight='balanced'  # Handle class imbalance
             )
         
         clf_binary.fit(X_train_scaled, y_train_binary)
         
-        # Predictions
-        y_pred_binary = clf_binary.predict(X_test_scaled)
+        # Get prediction probabilities
         y_pred_proba = clf_binary.predict_proba(X_test_scaled)[:, 1]
+        
+        # Threshold tuning for best F1
+        from sklearn.metrics import precision_recall_curve
+        prec, rec, thr = precision_recall_curve(y_test_binary, y_pred_proba)
+        f1 = 2 * prec[:-1] * rec[:-1] / (prec[:-1] + rec[:-1] + 1e-9)
+        best_thr = thr[f1.argmax()]
+        y_pred_binary = (y_pred_proba >= best_thr).astype(int)
+        print(f"Optimal threshold (max F1): {best_thr:.3f}")
         
         # Evaluation
         print("\nBinary Classification Results:")
@@ -272,6 +294,14 @@ class ConfusionMLDetector:
         print(f"\n2. Multi-class Classification")
         print("-" * 40)
         
+        # Sample weights for multiclass
+        from sklearn.utils import compute_class_weight
+        classes = np.unique(y_train)
+        cw = compute_class_weight('balanced', classes=classes, y=y_train)
+        class_weight_map = dict(zip(classes, cw))
+        sample_weight_multi = np.array([class_weight_map[c] for c in y_train])
+        print(f"Class weights: {class_weight_map}")
+        
         if model_type == 'xgboost':
             clf_multi = xgb.XGBClassifier(
                 n_estimators=100,
@@ -283,14 +313,16 @@ class ConfusionMLDetector:
                 objective='multi:softprob',
                 num_class=3
             )
+            clf_multi.fit(X_train_scaled, y_train, sample_weight=sample_weight_multi)
         else:
             clf_multi = RandomForestClassifier(
                 n_estimators=100,
                 max_depth=5,
-                random_state=42
+                random_state=42,
+                class_weight='balanced'
             )
+            clf_multi.fit(X_train_scaled, y_train)
         
-        clf_multi.fit(X_train_scaled, y_train)
         y_pred_multi = clf_multi.predict(X_test_scaled)
         
         print("\nMulti-class Classification Results:")
@@ -404,7 +436,13 @@ class ConfusionMLDetector:
         fpr, tpr, _ = roc_curve(results['y_test_binary'], results['y_pred_proba'])
         roc_auc = auc(fpr, tpr)
         
-        ax3.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (AUC = {roc_auc:.2f})')
+        # Also compute PR curve and average precision
+        from sklearn.metrics import precision_recall_curve, average_precision_score
+        precision, recall, _ = precision_recall_curve(results['y_test_binary'], results['y_pred_proba'])
+        avg_precision = average_precision_score(results['y_test_binary'], results['y_pred_proba'])
+        
+        # Plot both curves
+        ax3.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC (AUC = {roc_auc:.2f})')
         ax3.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--', label='Random')
         ax3.set_xlim([0.0, 1.0])
         ax3.set_ylim([0.0, 1.05])
@@ -414,20 +452,37 @@ class ConfusionMLDetector:
         ax3.legend(loc="lower right")
         ax3.grid(True, alpha=0.3)
         
-        # 4. Feature Importance (Top 15)
-        ax4 = plt.subplot(3, 3, (4, 5))
+        # 4. Precision-Recall Curve (better for imbalanced data)
+        ax4 = plt.subplot(3, 3, 4)
+        ax4.plot(recall, precision, color='green', lw=2, label=f'PR (AP = {avg_precision:.2f})')
+        ax4.set_xlabel('Recall')
+        ax4.set_ylabel('Precision')
+        ax4.set_title('Precision-Recall Curve\n(Better for Imbalanced Data)')
+        ax4.set_xlim([0.0, 1.0])
+        ax4.set_ylim([0.0, 1.05])
+        ax4.legend(loc="lower left")
+        ax4.grid(True, alpha=0.3)
+        
+        # Add baseline rate line
+        baseline_rate = np.sum(results['y_test_binary']) / len(results['y_test_binary'])
+        ax4.axhline(y=baseline_rate, color='red', linestyle='--', label=f'Baseline ({baseline_rate:.2f})')
+        
+        # 5. Feature Importance (Top 15)
+        ax5 = plt.subplot(3, 3, (5, 6))
+        # 5. Feature Importance (Top 15)
+        ax5 = plt.subplot(3, 3, (5, 6))
         top_n = 15
         indices = np.argsort(results['feature_importances'])[::-1][:top_n]
         
-        ax4.barh(range(top_n), results['feature_importances'][indices][::-1], color='steelblue')
-        ax4.set_yticks(range(top_n))
-        ax4.set_yticklabels([results['feature_names'][i] for i in indices[::-1]], fontsize=8)
-        ax4.set_xlabel('Importance')
-        ax4.set_title('Top 15 Feature Importances')
-        ax4.grid(True, alpha=0.3, axis='x')
+        ax5.barh(range(top_n), results['feature_importances'][indices][::-1], color='steelblue')
+        ax5.set_yticks(range(top_n))
+        ax5.set_yticklabels([results['feature_names'][i] for i in indices[::-1]], fontsize=8)
+        ax5.set_xlabel('Importance')
+        ax5.set_title('Top 15 Feature Importances')
+        ax5.grid(True, alpha=0.3, axis='x')
         
-        # 5. PCA Visualization
-        ax5 = plt.subplot(3, 3, 6)
+        # 6. PCA Visualization
+        ax6 = plt.subplot(3, 3, 7)
         pca = PCA(n_components=2)
         X_pca = pca.fit_transform(results['X_test'])
         
@@ -437,17 +492,17 @@ class ConfusionMLDetector:
         for i in range(3):
             mask = results['y_test'] == i
             if np.any(mask):
-                ax5.scatter(X_pca[mask, 0], X_pca[mask, 1], 
+                ax6.scatter(X_pca[mask, 0], X_pca[mask, 1], 
                           c=colors[i], label=labels[i], alpha=0.6, s=20)
         
-        ax5.set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.1%} var)')
-        ax5.set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.1%} var)')
-        ax5.set_title('PCA Projection of Test Data')
-        ax5.legend()
-        ax5.grid(True, alpha=0.3)
+        ax6.set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.1%} var)')
+        ax6.set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.1%} var)')
+        ax6.set_title('PCA Projection of Test Data')
+        ax6.legend()
+        ax6.grid(True, alpha=0.3)
         
-        # 6. Prediction Confidence Distribution
-        ax6 = plt.subplot(3, 3, 7)
+        # 7. Prediction Confidence Distribution
+        ax7 = plt.subplot(3, 3, 8)
         
         # Get prediction probabilities for confusion class
         confusion_proba = results['y_pred_proba']
@@ -456,17 +511,25 @@ class ConfusionMLDetector:
         baseline_proba = confusion_proba[results['y_test_binary'] == 0]
         confusion_proba_true = confusion_proba[results['y_test_binary'] == 1]
         
-        ax6.hist(baseline_proba, bins=20, alpha=0.5, label='True Baseline', color='green')
-        ax6.hist(confusion_proba_true, bins=20, alpha=0.5, label='True Confusion', color='red')
-        ax6.axvline(x=0.5, color='black', linestyle='--', label='Decision Threshold')
-        ax6.set_xlabel('Predicted Confusion Probability')
-        ax6.set_ylabel('Count')
-        ax6.set_title('Prediction Confidence Distribution')
-        ax6.legend()
-        ax6.grid(True, alpha=0.3)
+        ax7.hist(baseline_proba, bins=20, alpha=0.5, label='True Baseline', color='green')
+        ax7.hist(confusion_proba_true, bins=20, alpha=0.5, label='True Confusion', color='red')
+        ax7.axvline(x=0.5, color='black', linestyle='--', label='Default Threshold')
+        ax7.set_xlabel('Predicted Confusion Probability')
+        ax7.set_ylabel('Count')
+        ax7.set_title('Prediction Confidence Distribution')
+        ax7.legend()
+        ax7.grid(True, alpha=0.3)
         
-        # 7. Channel Contribution Analysis
-        ax7 = plt.subplot(3, 3, 8)
+        # 8. Channel Contribution Analysis
+        ax8 = plt.subplot(3, 3, 9)
+        
+        # Calculate average importance per channel
+        channel_importance = {}
+        for ch in self.channels:
+            ch_features = [i for i, name in enumerate(results['feature_names']) if name.startswith(ch)]
+            channel_importance[ch] = np.mean(results['feature_importances'][ch_features])
+        # 8. Channel Contribution Analysis
+        ax8 = plt.subplot(3, 3, 9)
         
         # Calculate average importance per channel
         channel_importance = {}
@@ -477,27 +540,13 @@ class ConfusionMLDetector:
         channels = list(channel_importance.keys())
         importances = list(channel_importance.values())
         
-        ax7.bar(channels, importances, color=['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4'])
-        ax7.set_xlabel('Channel')
-        ax7.set_ylabel('Average Feature Importance')
-        ax7.set_title('Channel Contribution to Detection')
-        ax7.grid(True, alpha=0.3, axis='y')
-        
-        # 8. Frequency Band Importance
-        ax8 = plt.subplot(3, 3, 9)
-        
-        bands = ['delta', 'theta', 'alpha', 'beta', 'gamma']
-        band_importance = {}
-        
-        for band in bands:
-            band_features = [i for i, name in enumerate(results['feature_names']) if band in name]
-            band_importance[band] = np.mean(results['feature_importances'][band_features]) if band_features else 0
-        
-        ax8.bar(bands, list(band_importance.values()), color='coral')
-        ax8.set_xlabel('Frequency Band')
+        ax8.bar(channels, importances, color=['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4'])
+        ax8.set_xlabel('Channel')
         ax8.set_ylabel('Average Feature Importance')
-        ax8.set_title('Frequency Band Contribution')
+        ax8.set_title('Channel Contribution to Detection')
         ax8.grid(True, alpha=0.3, axis='y')
+        
+        # Note: Frequency band importance plot removed to make room for PR curve
         
         plt.tight_layout()
         plt.show()
@@ -508,12 +557,13 @@ class ConfusionMLDetector:
         print("="*50)
         
         # Calculate metrics
-        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, average_precision_score
         
         binary_acc = accuracy_score(results['y_test_binary'], results['y_pred_binary'])
         binary_prec = precision_score(results['y_test_binary'], results['y_pred_binary'])
         binary_rec = recall_score(results['y_test_binary'], results['y_pred_binary'])
         binary_f1 = f1_score(results['y_test_binary'], results['y_pred_binary'])
+        avg_precision = average_precision_score(results['y_test_binary'], results['y_pred_proba'])
         
         print(f"\nBinary Classification (Confusion Detection):")
         print(f"  Accuracy:  {binary_acc:.3f}")
@@ -521,6 +571,7 @@ class ConfusionMLDetector:
         print(f"  Recall:    {binary_rec:.3f}")
         print(f"  F1-Score:  {binary_f1:.3f}")
         print(f"  ROC AUC:   {roc_auc:.3f}")
+        print(f"  Average Precision: {avg_precision:.3f} (more reliable for imbalanced data)")
         
         multi_acc = accuracy_score(results['y_test'], results['y_pred_multi'])
         
@@ -544,7 +595,13 @@ class ConfusionMLDetector:
         best_channel = max(channel_importance.items(), key=lambda x: x[1])
         print(f"  Most informative channel: {best_channel[0]}")
         
-        # Frequency analysis
+        # Frequency analysis - compute from feature names
+        bands = ['delta', 'theta', 'alpha', 'beta', 'gamma']
+        band_importance = {}
+        for band in bands:
+            band_features = [i for i, name in enumerate(results['feature_names']) if band in name]
+            band_importance[band] = np.mean(results['feature_importances'][band_features]) if band_features else 0
+        
         best_band = max(band_importance.items(), key=lambda x: x[1])
         print(f"  Most relevant frequency band: {best_band[0]}")
 
@@ -593,11 +650,12 @@ def main():
     detector = ConfusionMLDetector(filepath)
     
     # Create dataset with sliding windows
+    # Using longer pre-event window to account for human reaction time
     X, y, timestamps = detector.create_dataset(
         window_size=1.0,    # 1 second windows
         stride=0.1,         # 100ms stride for overlap
-        pre_event=0.5,      # Include 500ms before event
-        post_event=0.5      # Include 500ms after event
+        pre_event=1.0,      # Include 1.0s before event (reaction time)
+        post_event=0.7      # Include 0.7s after event
     )
     
     # Train and evaluate

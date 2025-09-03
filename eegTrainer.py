@@ -30,6 +30,8 @@ from tkinter import font as tkfont
 import signal as sig
 import atexit
 import sys
+import re
+
 
 # Training text with deliberately confusing elements
 TRAINING_TEXTS = [
@@ -86,7 +88,8 @@ class TeleprompterWindow:
     """Separate window for displaying text in large format"""
     def __init__(self, parent_visualizer):
         self.parent = parent_visualizer
-        self.root = tk.Tk()
+        parent_root = self.parent.get_tk_root()
+        self.root = tk.Toplevel(parent_root) if parent_root is not None else tk.Tk()
         self.root.title("📖 READING MATERIAL - Confusion Detection Training")
         
         # Make window large
@@ -137,6 +140,8 @@ class TeleprompterWindow:
                                     borderwidth=0,
                                     relief=tk.FLAT)
         self.text_display.pack(fill=tk.BOTH, expand=True)
+
+        self.text_display.tag_configure('gaze_word', background='#3b3b18', foreground='white')
         
         # Make text read-only
         self.text_display.config(state=tk.DISABLED)
@@ -167,6 +172,13 @@ class TeleprompterWindow:
                                     fg='#E74C3C',
                                     bg='#1a1a1a')
         self.event_status.pack(side=tk.LEFT, padx=20, pady=10)
+
+        self.gaze_status = tk.Label(status_frame,
+                                    text="Gaze: -- | flips: X=off Y=off",
+                                    font=('Arial', 16),
+                                    fg='#FFD93D',
+                                    bg='#1a1a1a')
+        self.gaze_status.pack(side=tk.LEFT, padx=20, pady=10)
         
         # Navigation hints
         nav_label = tk.Label(status_frame,
@@ -185,6 +197,92 @@ class TeleprompterWindow:
         
         # Update the display
         self.update_display()
+
+    def _tkindex_to_offset(self, idx: str):
+        """
+        Convert Tk 'line.char' to absolute char offset in the underlying text string.
+        Returns (offset:int) or -1 if invalid.
+        """
+        try:
+            line_str, col_str = idx.split('.')
+            line = int(line_str)
+            col = int(col_str)
+        except Exception:
+            return -1
+
+        # Use the exact text we inserted
+        txt = TRAINING_TEXTS[self.parent.current_text_index]
+        lines = txt.splitlines(True)  # keep '\n'
+        if line < 1 or line > len(lines):
+            return -1
+        offset = sum(len(lines[i]) for i in range(0, line - 1))
+        # clamp col within line
+        col = max(0, min(col, len(lines[line - 1])))
+        return offset + col
+
+    def update_gaze_async(self, x_norm: float, y_norm: float, conf: float):
+        """Thread-safe entry: schedule on Tk loop."""
+        if not self.active:
+            return
+        self.root.after(0, lambda: self._apply_gaze_to_text(x_norm, y_norm, conf))
+
+    def _apply_gaze_to_text(self, x_norm: float, y_norm: float, conf: float):
+        """
+        Map normalized gaze (0..1) to a word in the Text widget and highlight it.
+        """
+        try:
+            w = self.text_display.winfo_width()
+            h = self.text_display.winfo_height()
+            if w <= 1 or h <= 1:
+                return
+
+            # Convert to widget pixels
+            x_px = int(max(0, min(w - 1, x_norm * w)))
+            y_px = int(max(0, min(h - 1, y_norm * h)))
+
+            # Find closest index at that pixel
+            idx = self.text_display.index(f"@{x_px},{y_px}")
+
+            # Expand to word bounds
+            start = self.text_display.index(f"{idx} wordstart")
+            end = self.text_display.index(f"{idx} wordend")
+            word = self.text_display.get(start, end)
+
+            # If it's whitespace/punct, try to nudge right a few chars
+            if not re.search(r"\w", word):
+                for nudge in range(1, 4):
+                    idx2 = self.text_display.index(f"{idx}+{nudge}c")
+                    start = self.text_display.index(f"{idx2} wordstart")
+                    end = self.text_display.index(f"{idx2} wordend")
+                    word = self.text_display.get(start, end)
+                    if re.search(r"\w", word):
+                        break
+
+            # Clear previous highlight and apply new
+            self.text_display.tag_remove('gaze_word', '1.0', tk.END)
+            if re.search(r"\w", word):
+                self.text_display.tag_add('gaze_word', start, end)
+
+            # Offsets in the underlying text
+            start_off = self._tkindex_to_offset(start)
+            end_off = self._tkindex_to_offset(end)
+
+            # Status
+            flips = f"X={'on' if self.parent.flip_x else 'off'} Y={'on' if self.parent.flip_y else 'off'}"
+            shown_word = word if len(word) <= 24 else (word[:21] + '...')
+            self.gaze_status.config(text=f"Gaze: {shown_word or '--'} | conf={conf:.2f} | flips: {flips}")
+
+            # Notify visualizer so it can log while recording
+            self.parent.on_gaze_word({
+                'x': x_norm, 'y': y_norm, 'conf': conf,
+                'word': word, 'start_idx': start, 'end_idx': end,
+                'start_off': start_off, 'end_off': end_off
+            })
+        except Exception as e:
+            # Don't spam
+            pass
+
+    
         
     def on_key_press(self, event):
         """Handle keyboard events in teleprompter window"""
@@ -232,6 +330,16 @@ class TeleprompterWindow:
                 current_size = 28
             new_size = max(current_size - 2, 16)
             self.text_display.config(font=('Georgia', new_size, 'normal'))
+        elif event.char.lower() == 'x':
+            self.parent.flip_x = not self.parent.flip_x
+            self.update_status()
+        elif event.char.lower() == 'y':
+            self.parent.flip_y = not self.parent.flip_y
+            self.update_status()
+        elif event.char.lower() == 'm':  # mirror camera (alias for X)
+            self.parent.flip_x = not self.parent.flip_x
+            self.update_status()
+
     
     def flash_event(self, event_type):
         """Flash the screen briefly to indicate event recorded"""
@@ -287,6 +395,19 @@ class TeleprompterWindow:
                 text="⏸ NOT RECORDING",
                 fg='#888888'
             )
+                # Update gaze status flips if label exists
+        if hasattr(self, 'gaze_status'):
+            flips = f"X={'on' if self.parent.flip_x else 'off'} Y={'on' if self.parent.flip_y else 'off'}"
+            txt = self.gaze_status.cget('text')
+            # keep current word portion; just refresh flip flags
+            if '|' in txt:
+                parts = txt.split('|')
+                if len(parts) >= 3:
+                    parts[-1] = f" flips: {flips}"
+                    self.gaze_status.config(text='|'.join(parts))
+            else:
+                self.gaze_status.config(text=f"Gaze: -- | conf=-- | flips: {flips}")
+
     
     def on_close(self):
         """Handle window close"""
@@ -305,6 +426,13 @@ class MuseAthenaVisualizer:
         self.port = port
         self.socket = None
         self.running = False
+    
+    def get_tk_root(self):
+        """Return the Tk root used by Matplotlib’s TkAgg window."""
+        try:
+            return self.fig.canvas.get_tk_widget().winfo_toplevel()
+        except Exception:
+            return None
         
         # Data buffers
         self.buffer_size = buffer_size
@@ -417,6 +545,124 @@ class MuseAthenaVisualizer:
         # Register cleanup handlers
         atexit.register(self.cleanup_on_exit)
         sig.signal(sig.SIGINT, self.signal_handler)
+
+         # --- Gaze tracking config ---
+        self.gaze_port = 8053  # must match head_tracker --osc_port
+        self.gaze_socket = None
+        self.gaze_thread_running = False
+
+        # live gaze state (normalized 0..1 after flips & smoothing)
+        self.gaze_state = {'x': None, 'y': None, 'conf': 0.0, 'yaw': None, 'pitch': None, 'roll': None}
+        self.gaze_alpha = 0.35  # EMA smoothing for x,y
+
+        # flips (toggle with keys in teleprompter)
+        self.flip_x = False
+        self.flip_y = False
+
+        # continuous gaze logs (recorded while recording)
+        # each item: (timestamp, x, y, conf, word, start_off, end_off)
+        self.recorded_gaze = []
+
+        # === GAZE / OSC ===
+    def start_gaze_receiver(self):
+        """Start a separate UDP socket for gaze OSC."""
+        if self.gaze_thread_running:
+            return
+        try:
+            self.gaze_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.gaze_socket.bind(('0.0.0.0', self.gaze_port))
+            self.gaze_socket.settimeout(0.05)
+            self.gaze_thread_running = True
+            t = threading.Thread(target=self._gaze_receiver_loop, daemon=True)
+            t.start()
+            print(f"🧭 Gaze OSC receiver listening on UDP {self.gaze_port}")
+        except Exception as e:
+            print(f"❌ Failed to start gaze receiver: {e}")
+
+    def _smooth_xy(self, x, y):
+        """Simple EMA smoothing for gaze."""
+        sx = x if self.gaze_state['x'] is None else (self.gaze_alpha * x + (1 - self.gaze_alpha) * self.gaze_state['x'])
+        sy = y if self.gaze_state['y'] is None else (self.gaze_alpha * y + (1 - self.gaze_alpha) * self.gaze_state['y'])
+        return sx, sy
+
+    def _apply_gaze_update(self, x_norm, y_norm, conf, yaw=None, pitch=None, roll=None):
+        """Flip + smooth + store + notify teleprompter."""
+        # flips/mirror
+        if self.flip_x:
+            x_norm = 1.0 - x_norm
+        if self.flip_y:
+            y_norm = 1.0 - y_norm
+
+        # clamp
+        x_norm = float(max(0.0, min(1.0, x_norm)))
+        y_norm = float(max(0.0, min(1.0, y_norm)))
+
+        # smooth
+        x_s, y_s = self._smooth_xy(x_norm, y_norm)
+
+        # store
+        self.gaze_state.update({'x': x_s, 'y': y_s, 'conf': float(conf),
+                                'yaw': yaw, 'pitch': pitch, 'roll': roll})
+
+        # hand off to teleprompter (must schedule from Tk thread)
+        if self.teleprompter and self.teleprompter.active:
+            self.teleprompter.update_gaze_async(x_s, y_s, float(conf))
+
+    def _gaze_receiver_loop(self):
+        """Parse OSC messages: /gaze/norm, /gaze/screen, /head/ypr."""
+        while self.gaze_thread_running:
+            try:
+                data, _ = self.gaze_socket.recvfrom(1024)
+            except socket.timeout:
+                continue
+            except Exception as e:
+                if self.gaze_thread_running:
+                    print(f"Gaze recv error: {e}")
+                continue
+
+            msg = self.parse_osc_message(data)
+            if not msg:
+                continue
+            addr = msg['address']
+            args = msg['args']
+
+            if addr == '/gaze/norm' and len(args) >= 3:
+                x, y, conf = float(args[0]), float(args[1]), float(args[2])
+                self._apply_gaze_update(x, y, conf)
+            elif addr == '/gaze/screen' and len(args) >= 3:
+                # convert from pixels to norm using current screen; fall back if unknown
+                try:
+                    sw = self.teleprompter.root.winfo_screenwidth() if (self.teleprompter and self.teleprompter.active) else 1920
+                    sh = self.teleprompter.root.winfo_screenheight() if (self.teleprompter and self.teleprompter.active) else 1080
+                except Exception:
+                    sw, sh = 1920, 1080
+                x_px, y_px, conf = float(args[0]), float(args[1]), float(args[2])
+                x = x_px / max(sw, 1)
+                y = y_px / max(sh, 1)
+                self._apply_gaze_update(x, y, conf)
+            elif addr == '/head/ypr' and len(args) >= 3:
+                # we only store it; position still comes from /gaze/*
+                yaw, pitch, roll = float(args[0]), float(args[1]), float(args[2])
+                self.gaze_state.update({'yaw': yaw, 'pitch': pitch, 'roll': roll})
+
+    def on_gaze_word(self, info: dict):
+        """ Called from TeleprompterWindow on Tk thread when a word under gaze is resolved.
+        info = {'x':float,'y':float,'conf':float,'word':str,'start_idx':str,'end_idx':str,'start_off':int,'end_off':int} """
+        # During recording, log the gaze track
+        if self.is_recording:
+            self.recorded_gaze.append((
+                time.time(),
+                float(info.get('x', 0.0)),
+                float(info.get('y', 0.0)),
+                float(info.get('conf', 0.0)),
+                info.get('word', ''),
+                int(info.get('start_off', -1)),
+                int(info.get('end_off', -1))
+            ))
+
+
+    
+
         
     def signal_handler(self, signum, frame):
         """Handle Ctrl+C gracefully"""
@@ -819,16 +1065,34 @@ class MuseAthenaVisualizer:
                     'fnirs_channels': ['Ch1_norm', 'Ch2_norm', 'Ch3_norm', 'Ch4_norm', 
                                      'Ch1_raw', 'Ch2_raw', 'Ch3_raw', 'Ch4_raw'],
                     'motion_channels': ['acc_x', 'acc_y', 'acc_z', 'gyro_x', 'gyro_y', 'gyro_z'],
-                    'ref_channels': ['DRL', 'REF']
+                    'ref_channels': ['DRL', 'REF'],
+                    'gaze_flip_x': bool(self.flip_x),
+                    'gaze_flip_y': bool(self.flip_y),
+                    'gaze_osc_port': int(self.gaze_port),
                 }
                 
                 # Update button
                 if self.record_button:
                     self.record_button.label.set_text('Writing file...')
                     plt.draw()  # Force UI update
+
+                
                 
                 print("Saving to file...")
                 # Save as compressed numpy file
+
+                                # Gaze track arrays
+                if self.recorded_gaze:
+                    gz_ts = np.array([g[0] for g in self.recorded_gaze], dtype=np.float64)
+                    gz_x  = np.array([g[1] for g in self.recorded_gaze], dtype=np.float32)
+                    gz_y  = np.array([g[2] for g in self.recorded_gaze], dtype=np.float32)
+                    gz_c  = np.array([g[3] for g in self.recorded_gaze], dtype=np.float32)
+                    gz_ws = np.array([g[4] for g in self.recorded_gaze], dtype=object)  # word strings
+                    gz_s  = np.array([g[5] for g in self.recorded_gaze], dtype=np.int32)
+                    gz_e  = np.array([g[6] for g in self.recorded_gaze], dtype=np.int32)
+                else:
+                    gz_ts = gz_x = gz_y = gz_c = gz_ws = gz_s = gz_e = np.array([])
+
                 np.savez_compressed(
                     filename,
                     timestamps=timestamps,
@@ -839,7 +1103,14 @@ class MuseAthenaVisualizer:
                     ref=ref_data,
                     event_timestamps=event_timestamps,
                     event_types=event_types,
-                    metadata=metadata
+                    metadata=metadata,
+                    gaze_timestamps=gz_ts,
+                    gaze_x_norm=gz_x,
+                    gaze_y_norm=gz_y,
+                    gaze_conf=gz_c,
+                    gaze_word=gz_ws,
+                    gaze_word_start=gz_s,
+                    gaze_word_end=gz_e,
                 )
                 
                 print(f"\n{'='*50}")
@@ -854,6 +1125,7 @@ class MuseAthenaVisualizer:
                 print(f"  - Reference data: {ref_data.shape if ref_data.size > 0 else 'None'}")
                 print(f"  - {len(event_timestamps)} events marked")
                 print(f"  - Text passage: {save_data['current_text_index'] + 1}/{len(TRAINING_TEXTS)}")
+                print(f"  - Gaze points: {len(gz_ts)}")
                 
                 if len(event_timestamps) > 0:
                     print(f"\nEvent Summary:")
@@ -1245,7 +1517,18 @@ class MuseAthenaVisualizer:
         self.axes['info'].set_yticks([])
         for spine in self.axes['info'].spines.values():
             spine.set_visible(False)
-        
+                # Current gaze word
+        if self.gaze_state['x'] is not None and self.teleprompter and self.teleprompter.active:
+            # The Teleprompter handles highlighting; here we just show last word string from label
+            try:
+                txt = self.teleprompter.gaze_status.cget('text')
+                gaze_part = txt.split('|')[0].replace('Gaze:', '').strip()
+                self.axes['info'].text(0.1, y_pos - 0.06, f"Gaze word: {gaze_part}", fontsize=10, color='#FFD93D',
+                                       transform=self.axes['info'].transAxes)
+                y_pos -= 0.10
+            except Exception:
+                pass
+
         y_pos = 0.95
         self.axes['info'].text(0.1, y_pos, 'Signal Statistics', 
                              fontsize=12, weight='bold', color='#FFD93D',
@@ -1458,6 +1741,11 @@ class MuseAthenaVisualizer:
         # Create and open teleprompter window
         print("\n📖 Opening teleprompter window...")
         self.teleprompter = TeleprompterWindow(self)
+
+        # Start OSC gaze listener
+        self.start_gaze_receiver()
+        print("Tip: Press 'x'/'y'/'m' in the teleprompter to flip axes if needed.")
+
         
         # Start teleprompter update loop
         self.teleprompter.update_loop()
@@ -1526,15 +1814,7 @@ class MuseAthenaVisualizer:
         print("\n" + "="*60)
         
         try:
-            # Run both windows
-            def run_teleprompter():
-                if self.teleprompter:
-                    self.teleprompter.root.mainloop()
-            
-            teleprompter_thread = threading.Thread(target=run_teleprompter)
-            teleprompter_thread.daemon = True
-            teleprompter_thread.start()
-            
+            # Single Tk mainloop via TkAgg for both windows
             plt.show()
         except KeyboardInterrupt:
             print("\nKeyboard interrupt received")

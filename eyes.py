@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Improved Eye Tracker with MediaPipe - Accurate gaze estimation for webcam on monitor
+Improved Eye Tracker with MediaPipe - Fixed threading and calibration stability
 
-Major improvements:
-- MediaPipe face mesh for precise eye landmarks
-- Better pupil detection using iris landmarks
-- Head pose compensation
-- Improved calibration with neural network option
-- Better filtering and stabilization
+FIXES:
+- Fixed Tkinter threading issue causing crashes
+- Fixed NumPy deprecation warnings
+- Improved calibration stability (less jittery)
+- Better feature engineering for more robust tracking
+- Simplified polynomial model to prevent overfitting
 
 Controls:
   c = calibrate    o = toggle overlay
@@ -53,7 +53,7 @@ def _get_screen_size() -> Tuple[int, int]:
 
 
 class KalmanFilter2D:
-    """Simple 2D Kalman filter for smoothing gaze points"""
+    """Simple 2D Kalman filter for smoothing gaze points - FIXED numpy warnings"""
     def __init__(self, process_noise=0.01, measurement_noise=1.0):
         self.kf = cv2.KalmanFilter(4, 2)
         self.kf.measurementMatrix = np.array([[1, 0, 0, 0],
@@ -76,12 +76,14 @@ class KalmanFilter2D:
             
         self.kf.correct(measurement)
         prediction = self.kf.predict()
-        return int(prediction[0]), int(prediction[1])
+        # FIXED: Extract scalar values properly to avoid deprecation warning
+        return int(prediction[0, 0]), int(prediction[1, 0])
 
 
-# ============================ Overlay =======================================
+# ============================ Thread-Safe Overlay =======================================
 
-class PointerOverlay:
+class ThreadSafePointerOverlay:
+    """FIXED: Thread-safe overlay that properly handles Tkinter threading"""
     def __init__(self, alpha: float = 0.7):
         if not _HAS_TK:
             raise RuntimeError("Tkinter not available.")
@@ -92,35 +94,70 @@ class PointerOverlay:
         self._running = False
         self._update_queue = queue.Queue()
         self.sw, self.sh = _get_screen_size()
+        self._thread = None
 
-    def _create_window(self):
-        """Create window in the main thread"""
-        self.root = tk.Tk()
-        self.root.title("Gaze Pointer Overlay")
-        self.root.attributes('-topmost', True)
-        try:
-            self.root.attributes('-alpha', self.alpha)
-        except Exception:
-            pass
-        self.root.overrideredirect(True)
-        self.root.geometry(f"{self.sw}x{self.sh}+0+0")
-        self.canvas = tk.Canvas(self.root, width=self.sw, height=self.sh, bg='black', highlightthickness=0)
-        self.canvas.pack(fill='both', expand=True)
-        try:
-            self.root.wm_attributes('-transparentcolor', 'black')
-        except Exception:
-            pass
-        self._running = True
-
-    def update_point(self, x: int, y: int, conf: float):
-        """Queue update to be processed in main thread"""
+    def start(self):
+        """Start the overlay in a separate thread"""
         if self._running:
-            self._update_queue.put((x, y, conf))
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._run_overlay, daemon=True)
+        self._thread.start()
 
-    def _process_update(self, x: int, y: int, conf: float):
-        """Process update in main thread"""
+    def _run_overlay(self):
+        """Run the overlay - this runs in its own thread"""
+        try:
+            self.root = tk.Tk()
+            self.root.title("Gaze Pointer Overlay")
+            self.root.attributes('-topmost', True)
+            try:
+                self.root.attributes('-alpha', self.alpha)
+            except Exception:
+                pass
+            self.root.overrideredirect(True)
+            self.root.geometry(f"{self.sw}x{self.sh}+0+0")
+            self.canvas = tk.Canvas(self.root, width=self.sw, height=self.sh, bg='black', highlightthickness=0)
+            self.canvas.pack(fill='both', expand=True)
+            try:
+                self.root.wm_attributes('-transparentcolor', 'black')
+            except Exception:
+                pass
+            
+            # Set up the update loop
+            self._schedule_update()
+            
+            # Start the Tkinter main loop
+            self.root.mainloop()
+        except Exception as e:
+            print(f"[overlay] Error in overlay thread: {e}")
+        finally:
+            self._running = False
+
+    def _schedule_update(self):
+        """Schedule periodic updates - runs in Tkinter thread"""
+        if not self._running or not self.root:
+            return
+        
+        try:
+            # Process all queued updates
+            while not self._update_queue.empty():
+                try:
+                    x, y, conf = self._update_queue.get_nowait()
+                    self._draw_point(x, y, conf)
+                except queue.Empty:
+                    break
+        except Exception as e:
+            print(f"[overlay] Update error: {e}")
+        
+        # Schedule next update
+        if self._running:
+            self.root.after(16, self._schedule_update)  # ~60 FPS
+
+    def _draw_point(self, x: int, y: int, conf: float):
+        """Draw the gaze point - runs in Tkinter thread"""
         if not self._running or not self.canvas:
             return
+        
         x = max(0, min(x, self.sw))
         y = max(0, min(y, self.sh))
         self.canvas.delete("gaze")
@@ -157,34 +194,31 @@ class PointerOverlay:
         self.canvas.create_text(x+size+15, y-size, text=conf_text, fill=col, 
                                font=('Arial', 10, 'bold'), anchor='w', tags="gaze")
 
-    def run_loop(self):
-        """Run in main thread"""
-        self._create_window()
-        
-        def _tick():
-            if self._running:
-                # Process queued updates
-                try:
-                    while not self._update_queue.empty():
-                        x, y, conf = self._update_queue.get_nowait()
-                        self._process_update(x, y, conf)
-                except queue.Empty:
-                    pass
-                self.root.after(16, _tick)
-        
-        _tick()
-        self.root.mainloop()
+    def update_point(self, x: int, y: int, conf: float):
+        """Queue update from any thread"""
+        if self._running:
+            try:
+                self._update_queue.put_nowait((x, y, conf))
+            except queue.Full:
+                # If queue is full, skip this update
+                pass
 
     def close(self):
-        """Close from main thread"""
+        """Close the overlay"""
         self._running = False
         if self.root:
-            try:
+            # Schedule the destruction in the Tkinter thread
+            self.root.after(0, self._destroy_window)
+
+    def _destroy_window(self):
+        """Destroy window - must run in Tkinter thread"""
+        try:
+            if self.root:
                 self.root.quit()
                 self.root.destroy()
-            except Exception:
-                pass
-            self.root = None
+        except Exception:
+            pass
+        self.root = None
 
 
 # ============================ MediaPipe Eye Detector ========================
@@ -354,20 +388,25 @@ class ImprovedEyeTracker:
         self._thread: Optional[threading.Thread] = None
         
         self._cal = None  # Calibration data
-        self._kalman = KalmanFilter2D(process_noise=0.005, measurement_noise=0.5)
+        # FIXED: More conservative Kalman filter settings for stability
+        self._kalman = KalmanFilter2D(process_noise=0.002, measurement_noise=0.3)
         
         self._lock = threading.Lock()
         self._latest: Optional[GazeSample] = None
         
-        self._overlay: Optional[PointerOverlay] = None
+        self._overlay: Optional[ThreadSafePointerOverlay] = None
         self._overlay_enabled = False
-        self._overlay_thread = None
         
         self._rec_active = False
         self._rec_data = []
         
-        # Smoothing
-        self._smooth_window = deque(maxlen=5)
+        # FIXED: Better smoothing for less jitter
+        self._smooth_window = deque(maxlen=7)  # Increased window size
+        self._outlier_threshold = 200  # Pixel distance for outlier detection
+
+        # Calibration data collection
+        self._calibration_mode = False
+        self._cal_data_queue = queue.Queue()
 
     def _open_camera_try(self, backend_id: int, backend_name: str, index: int) -> Optional[cv2.VideoCapture]:
         cap = None
@@ -479,6 +518,25 @@ class ImprovedEyeTracker:
             print("Calibration requires Tkinter.")
             return
         
+        print(f"[eye] Starting calibration with {points} points...")
+        
+        # FIXED: Temporarily disable overlay during calibration to prevent Tkinter conflicts
+        overlay_was_enabled = self._overlay_enabled
+        if self._overlay_enabled:
+            print("[eye] Temporarily disabling overlay for calibration...")
+            self.toggle_overlay()  # This will disable it
+            time.sleep(0.5)  # Give it time to fully close
+        
+        # Enable calibration mode to ensure data collection
+        self._calibration_mode = True
+        
+        # Clear queue
+        while not self._cal_data_queue.empty():
+            try:
+                self._cal_data_queue.get_nowait()
+            except:
+                break
+        
         def grid(n):
             if n == 9:
                 return [(0.15,0.15),(0.5,0.15),(0.85,0.15),
@@ -498,20 +556,13 @@ class ImprovedEyeTracker:
         # Create calibration window
         root = tk.Tk()
         root.title("Eye Tracker Calibration")
-        
-        # Set window properties more carefully
         root.configure(bg='#1a1a1a')
-        root.geometry(f"{sw}x{sh}+0+0")  # Set size before fullscreen
-        
-        # Force window to front
-        root.lift()
-        root.attributes('-topmost', True)
-        
-        # Wait for window to be created before going fullscreen
+        root.geometry(f"{sw}x{sh}+0+0")
         root.update_idletasks()
+        root.update()
+        time.sleep(0.1)
         root.attributes('-fullscreen', True)
-        
-        # Force focus
+        root.attributes('-topmost', True)
         root.focus_force()
         root.update()
         
@@ -525,10 +576,9 @@ class ImprovedEyeTracker:
         hint = canv.create_text(sw//2, sh-50, text="Press ESC to abort calibration",
                             font=('Arial', 16), fill='#666666')
         
-        # Update canvas to show initial text
         canv.update()
         
-        idx = [0]  # Use list to allow modification in nested function
+        idx = [0]
         samples = []
         aborted = [False]
         t_start = [time.time() + 1.5]  # Start delay
@@ -540,7 +590,6 @@ class ImprovedEyeTracker:
             root.quit()
         
         root.bind('<Escape>', on_escape)
-        root.bind('<Escape>', on_escape, add='+')  # Ensure binding works
         
         def draw_point(i):
             canv.delete("pt")
@@ -564,7 +613,7 @@ class ImprovedEyeTracker:
             canv.create_line(x-50, y, x+50, y, fill='white', width=1, tags="pt")
             canv.create_line(x, y-50, x, y+50, fill='white', width=1, tags="pt")
             
-            canv.update()  # Force visual update
+            canv.update()
         
         def tick():
             try:
@@ -588,26 +637,39 @@ class ImprovedEyeTracker:
                     root.after(100, lambda: root.quit())
                     return
                 
-                # Get eye tracking data
-                snap = self.get_sample_snapshot()
-                if snap is not None and snap['confidence'] > 0.3:
-                    gf = np.asarray(snap['gaze_features'], dtype=np.float32)
-                    if not np.any(np.isnan(gf)) and not np.any(np.isinf(gf)):
-                        cur_feats.append(gf)
+                # Get calibration data from queue
+                collected_this_tick = 0
+                try:
+                    while not self._cal_data_queue.empty() and collected_this_tick < 10:
+                        feat = self._cal_data_queue.get_nowait()
+                        cur_feats.append(feat)
+                        collected_this_tick += 1
+                except:
+                    pass
                 
                 elapsed_ms = (time.time() - t_start[0]) * 1000.0
                 progress = min(100, int(100*len(cur_feats)/max(1,samples_per_point)))
                 
                 # Update progress text
-                canv.itemconfig(prog, text=f"Point {idx[0]+1}/{len(coords)} - {progress}% collected")
+                canv.itemconfig(prog, text=f"Point {idx[0]+1}/{len(coords)} - {progress}% collected ({len(cur_feats)}/{samples_per_point})")
                 
                 # Check if we have enough samples for this point
                 if elapsed_ms >= dwell_ms and len(cur_feats) >= samples_per_point:
                     # Save this calibration point
                     if len(cur_feats) > 0:
-                        v = np.median(np.stack(cur_feats, axis=0), axis=0)
-                        xr, yr = coords[idx[0]]
-                        samples.append({'screen_x': int(xr*sw), 'screen_y': int(yr*sh), 'feat': v})
+                        # FIXED: Use more robust feature aggregation
+                        feats_array = np.stack(cur_feats, axis=0)
+                        # Remove outliers (features that are too far from median)
+                        median_feat = np.median(feats_array, axis=0)
+                        distances = np.linalg.norm(feats_array - median_feat, axis=1)
+                        threshold = np.percentile(distances, 75)  # Keep 75% of samples
+                        good_feats = feats_array[distances <= threshold]
+                        
+                        if len(good_feats) > 0:
+                            v = np.mean(good_feats, axis=0)  # Use mean of good samples
+                            xr, yr = coords[idx[0]]
+                            samples.append({'screen_x': int(xr*sw), 'screen_y': int(yr*sh), 'feat': v})
+                            print(f"[eye] Calibration point {idx[0]+1} completed with {len(good_feats)}/{len(cur_feats)} good samples")
                     
                     # Move to next point
                     idx[0] += 1
@@ -634,6 +696,9 @@ class ImprovedEyeTracker:
         except Exception as e:
             print(f"[eye] Calibration mainloop error: {e}")
         
+        # Disable calibration mode
+        self._calibration_mode = False
+        
         # Clean up
         try:
             root.destroy()
@@ -647,7 +712,7 @@ class ImprovedEyeTracker:
         
         print(f"[eye] Processing {len(samples)} calibration points...")
         
-        # Build calibration model
+        # Build calibration model - FIXED: Simpler model to prevent overfitting
         X = np.stack([s['feat'] for s in samples], axis=0).astype(np.float32)
         Y = np.stack([[s['screen_x'], s['screen_y']] for s in samples], axis=0).astype(np.float32)
         
@@ -656,24 +721,28 @@ class ImprovedEyeTracker:
         sg = X.std(axis=0) + 1e-6
         Xn = (X - mu) / sg
         
-        # Use polynomial features for better fitting
+        # FIXED: Simplified feature engineering - less prone to overfitting
         def make_features(x):
-            # Add polynomial and interaction terms
+            # Much simpler model: just linear and a few key interactions
             f = [1.0]  # Bias
             f.extend(x)  # Linear terms
-            # Quadratic terms  
-            for i in range(len(x)):
+            
+            # Only add quadratic terms for eye offset features (first 4 features)
+            # Skip head pose quadratics as they can cause instability
+            for i in range(min(4, len(x))):
                 f.append(x[i]**2)
-            # Interaction terms
-            for i in range(len(x)):
-                for j in range(i+1, len(x)):
-                    f.append(x[i] * x[j])
+            
+            # Only most important interactions (left-right and x-y)
+            if len(x) >= 4:
+                f.append(x[0] * x[2])  # left_x * right_x
+                f.append(x[1] * x[3])  # left_y * right_y
+                
             return np.array(f)
         
         Phi = np.stack([make_features(xi) for xi in Xn], axis=0)
         
-        # Ridge regression
-        lam = 0.01
+        # FIXED: Higher regularization for stability
+        lam = 0.1  # Increased regularization
         A = Phi.T @ Phi + lam * np.eye(Phi.shape[1], dtype=np.float32)
         B = Phi.T @ Y
         
@@ -691,10 +760,16 @@ class ImprovedEyeTracker:
             'samples': samples
         }
         
-        # Reset Kalman filter
-        self._kalman = KalmanFilter2D(process_noise=0.005, measurement_noise=0.5)
+        # Reset Kalman filter with more conservative settings
+        self._kalman = KalmanFilter2D(process_noise=0.001, measurement_noise=0.2)
         
         print(f"[eye] ✓ Calibration complete: {len(samples)} points collected.")
+        
+        # FIXED: Re-enable overlay if it was enabled before calibration
+        if overlay_was_enabled:
+            print("[eye] Re-enabling overlay...")
+            time.sleep(0.5)  # Brief pause before restarting
+            self.toggle_overlay()  # This will enable it again
 
     def start_recording(self):
         if self._rec_active:
@@ -737,20 +812,35 @@ class ImprovedEyeTracker:
         if self._overlay_enabled:
             if self._overlay:
                 self._overlay.close()
+                time.sleep(0.5)  # Give it more time to close properly
             self._overlay = None
             self._overlay_enabled = False
             print("[eye] Overlay hidden.")
             return
         
-        # Create and run overlay
-        self._overlay = PointerOverlay(alpha=0.7)
-        self._overlay_enabled = True
+        # Create and start overlay
+        try:
+            self._overlay = ThreadSafePointerOverlay(alpha=0.7)
+            self._overlay.start()
+            self._overlay_enabled = True
+            time.sleep(0.2)  # Give it time to start
+            print("[eye] Overlay shown.")
+        except Exception as e:
+            print(f"[eye] Failed to start overlay: {e}")
+            self._overlay_enabled = False
+
+    def _is_outlier(self, xy: Tuple[int, int]) -> bool:
+        """FIXED: Detect outlier gaze points for better stability"""
+        if len(self._smooth_window) < 3:
+            return False
         
-        # Run overlay in a separate thread
-        self._overlay_thread = threading.Thread(target=self._overlay.run_loop, daemon=True)
-        self._overlay_thread.start()
-        
-        print("[eye] Overlay shown.")
+        # Check distance from recent samples
+        recent = list(self._smooth_window)[-3:]
+        for px, py in recent:
+            dist = np.sqrt((xy[0] - px)**2 + (xy[1] - py)**2)
+            if dist < self._outlier_threshold:
+                return False
+        return True
 
     def _loop(self):
         dbg_open = False
@@ -779,33 +869,45 @@ class ImprovedEyeTracker:
                 head_pose = np.array(det['head_pose'], dtype=np.float32)
                 feat = np.concatenate([eye_feat, head_pose])
                 
+                # Queue calibration data when in calibration mode
+                if self._calibration_mode:
+                    if not np.any(np.isnan(feat)) and not np.any(np.isinf(feat)):
+                        try:
+                            self._cal_data_queue.put_nowait(feat.copy())
+                        except:
+                            pass  # Queue full, ignore
+                
                 xy, conf = self._map_to_screen(feat)
                 
-                # Apply additional smoothing
-                self._smooth_window.append(xy)
-                if len(self._smooth_window) > 2:
-                    smooth_x = int(np.median([p[0] for p in self._smooth_window]))
-                    smooth_y = int(np.median([p[1] for p in self._smooth_window]))
-                    xy = (smooth_x, smooth_y)
-                
-                sample = GazeSample(t=t, xy=xy, feat=feat, conf=float(conf))
-                
-                with self._lock:
-                    self._latest = sample
-                
-                if self._rec_active:
-                    self._rec_data.append({
-                        'timestamp': sample.t,
-                        'gaze_xy': sample.xy,
-                        'features': sample.feat.tolist(),
-                        'confidence': sample.conf
-                    })
-                
-                if self._overlay_enabled and self._overlay:
-                    try:
-                        self._overlay.update_point(sample.xy[0], sample.xy[1], sample.conf)
-                    except Exception:
-                        pass
+                # FIXED: Better outlier detection and smoothing
+                if not self._is_outlier(xy):
+                    self._smooth_window.append(xy)
+                    
+                    # Apply median smoothing for stability
+                    if len(self._smooth_window) > 3:
+                        recent = list(self._smooth_window)[-5:]  # Use last 5 points
+                        smooth_x = int(np.median([p[0] for p in recent]))
+                        smooth_y = int(np.median([p[1] for p in recent]))
+                        xy = (smooth_x, smooth_y)
+                    
+                    sample = GazeSample(t=t, xy=xy, feat=feat, conf=float(conf))
+                    
+                    with self._lock:
+                        self._latest = sample
+                    
+                    if self._rec_active:
+                        self._rec_data.append({
+                            'timestamp': sample.t,
+                            'gaze_xy': sample.xy,
+                            'features': sample.feat.tolist(),
+                            'confidence': sample.conf
+                        })
+                    
+                    if self._overlay_enabled and self._overlay:
+                        try:
+                            self._overlay.update_point(sample.xy[0], sample.xy[1], sample.conf)
+                        except Exception:
+                            pass
                 
                 no_face_count = 0
                 
@@ -831,12 +933,20 @@ class ImprovedEyeTracker:
                             cv2.circle(frame, tuple(map(int, det['right_iris'])), 5, (255, 0, 0), -1)
                         
                         # Show gaze info
-                        cv2.putText(frame, f"Gaze: {sample.xy[0]},{sample.xy[1]}", 
+                        cv2.putText(frame, f"Gaze: {xy[0]},{xy[1]}", 
                                   (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                        cv2.putText(frame, f"Confidence: {sample.conf:.2f}", 
+                        cv2.putText(frame, f"Confidence: {conf:.2f}", 
                                   (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                         cv2.putText(frame, f"Head: Y:{det['head_pose'][0]:.1f} P:{det['head_pose'][1]:.1f} R:{det['head_pose'][2]:.1f}", 
                                   (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                        cv2.putText(frame, f"Calibrated: {'YES' if self._cal else 'NO'}", 
+                                  (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0) if self._cal else (0, 0, 255), 2)
+                        
+                        if self._calibration_mode:
+                            cv2.putText(frame, "CALIBRATION MODE", 
+                                      (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                            cv2.putText(frame, f"Cal Queue: {self._cal_data_queue.qsize()}", 
+                                      (10, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                     except Exception:
                         pass
             else:
@@ -863,7 +973,6 @@ class ImprovedEyeTracker:
     def _map_to_screen(self, feat: np.ndarray) -> Tuple[Tuple[int, int], float]:
         if self._cal is None:
             # No calibration - use simple linear mapping
-            # Assuming feat = [left_x, left_y, right_x, right_y, yaw, pitch, roll]
             if len(feat) >= 4:
                 # Average both eyes and apply basic scaling
                 avg_x = (feat[0] + feat[2]) / 2
@@ -872,17 +981,17 @@ class ImprovedEyeTracker:
                 # Compensate for head pose if available
                 if len(feat) >= 7:
                     yaw, pitch = feat[4], feat[5]
-                    avg_x += yaw * 0.01  # Adjust these coefficients
-                    avg_y += pitch * 0.01
+                    avg_x += yaw * 0.008  # Reduced compensation for stability
+                    avg_y += pitch * 0.008
                 
                 # Map to screen (rough approximation)
-                x = int(self.screen_w/2 - avg_x * self.screen_w * 0.3)
-                y = int(self.screen_h/2 + avg_y * self.screen_h * 0.3)
+                x = int(self.screen_w/2 - avg_x * self.screen_w * 0.25)  # Reduced sensitivity
+                y = int(self.screen_h/2 + avg_y * self.screen_h * 0.25)
                 
                 x = np.clip(x, 0, self.screen_w)
                 y = np.clip(y, 0, self.screen_h)
                 
-                return (x, y), 0.3
+                return (x, y), 0.4  # Higher confidence for uncalibrated
             else:
                 return (self.screen_w//2, self.screen_h//2), 0.1
         
@@ -895,7 +1004,7 @@ class ImprovedEyeTracker:
         # Normalize
         vn = (feat - mu) / sg
         
-        # Create polynomial features
+        # Create features
         phi = make_features(vn)
         
         # Predict screen position
@@ -920,7 +1029,7 @@ class ImprovedEyeTracker:
             
             # Normalize distance to confidence (closer = higher confidence)
             max_dist = np.sqrt(self.screen_w**2 + self.screen_h**2) / 4
-            conf = max(0.3, min(1.0, 1.0 - min_dist / max_dist))
+            conf = max(0.5, min(0.95, 1.0 - min_dist / max_dist))  # Higher baseline confidence
         else:
             conf = 0.7
         
@@ -1007,7 +1116,7 @@ def main():
     args = parse_args()
     
     print("\n" + "="*60)
-    print("    Improved Eye Tracker with MediaPipe")
+    print("    Improved Eye Tracker with MediaPipe - FIXED VERSION")
     print("="*60)
     print(f"OpenCV: {cv2.__version__}")
     print(f"MediaPipe: {mp.__version__}")
@@ -1031,6 +1140,7 @@ def main():
             et.calibrate(points=9)
         
         print("\n[eye] System ready. Enter commands:")
+        print("[note] Try without calibration first - it may be more stable!")
         
         while True:
             try:

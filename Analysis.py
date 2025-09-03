@@ -33,6 +33,11 @@ class ConfusionMLDetector:
         self.event_timestamps = self.data['event_timestamps']
         self.event_types = self.data['event_types']
         
+        # NOTE: fNIRS, motion, and ref data are saved but not currently used in features
+        # Could add: slow hemodynamic features from fNIRS, motion artifacts detection, etc.
+        # self.fnirs = self.data['fnirs'] if 'fnirs' in self.data else None
+        # self.motion = self.data['motion'] if 'motion' in self.data else None
+        
         # Metadata
         self.metadata = self.data['metadata'].item() if 'metadata' in self.data else {}
         self.sample_rate = self.metadata.get('sample_rate', 256)
@@ -85,7 +90,17 @@ class ConfusionMLDetector:
                 if not np.all(np.isnan(self.eeg[:, ch])):
                     self.eeg_processed[:, ch] = signal.filtfilt(b, a, self.eeg[:, ch])
         
-        print("  ✓ Preprocessing complete")
+        # Add notch filters for powerline noise (60 Hz and 120 Hz)
+        print("  Applying notch filters (60 Hz, 120 Hz)...")
+        for freq in [60, 120]:
+            if freq < nyquist:  # Only apply if within Nyquist frequency
+                notch_freq = freq / nyquist
+                b_notch, a_notch = signal.iirnotch(notch_freq, Q=30)
+                for ch in range(self.eeg.shape[1]):
+                    if not np.all(np.isnan(self.eeg_processed[:, ch])):
+                        self.eeg_processed[:, ch] = signal.filtfilt(b_notch, a_notch, self.eeg_processed[:, ch])
+        
+        print("  ✔ Preprocessing complete")
     
     def extract_features(self, window_data):
         """Extract features from an EEG window"""
@@ -150,17 +165,29 @@ class ConfusionMLDetector:
         
         return np.array(features)
     
-    def create_dataset(self, window_size=1.0, stride=0.1, pre_event=0.5, post_event=0.5):
-        """Create ML dataset with sliding windows"""
+    def create_dataset(self, window_size=1.0, stride=0.1, pre_event=2.0, post_event=-0.3, 
+                      safety_margin=1.0, downsample_baseline_ratio=3):
+        """Create ML dataset with sliding windows
+        
+        CRITICAL CHANGE: Windows are now labeled based on whether they occur BEFORE the event,
+        not including the keypress itself to avoid motor artifacts.
+        
+        Args:
+            window_size: Size of each window in seconds
+            stride: Step size between windows in seconds  
+            pre_event: How far BEFORE the event to look for confusion signal (positive value)
+            post_event: End of confusion window relative to event (negative = before event)
+            safety_margin: Minimum distance from any event for baseline samples
+            downsample_baseline_ratio: Max ratio of baseline to positive samples (None = no downsampling)
+        """
         print(f"\nCreating dataset...")
         print(f"  Window size: {window_size}s")
         print(f"  Stride: {stride}s")
-        print(f"  Event window: -{pre_event}s to +{post_event}s")
+        print(f"  Confusion window: -{pre_event}s to {post_event}s before keypress")
+        print(f"  (Avoiding motor artifacts by excluding keypress)")
         
         window_samples = int(window_size * self.sample_rate)
         stride_samples = int(stride * self.sample_rate)
-        pre_samples = int(pre_event * self.sample_rate)
-        post_samples = int(post_event * self.sample_rate)
         
         X = []  # Features
         y = []  # Labels (0=baseline, 1=word_confusion, 2=sentence_confusion)
@@ -171,29 +198,32 @@ class ConfusionMLDetector:
             window = self.eeg_processed[i:i + window_samples]
             window_center_time = self.timestamps[i + window_samples // 2]
             
-            # Check if this window contains or is near a confusion event
+            # CRITICAL CHANGE: Check if window occurs BEFORE the confusion event
+            # This captures the cognitive confusion state without motor artifacts
             label = 0  # Default: baseline
             
             # Check word confusion events
             for event_time in self.word_events:
+                # Window should be BEFORE the keypress to avoid motor artifacts
                 if (window_center_time >= event_time - pre_event and 
-                    window_center_time <= event_time + post_event):
+                    window_center_time <= event_time + post_event):  # post_event is negative
                     label = 1
                     break
             
             # Check sentence confusion events (priority over word)
             for event_time in self.sentence_events:
+                # Window should be BEFORE the keypress  
                 if (window_center_time >= event_time - pre_event and 
-                    window_center_time <= event_time + post_event):
+                    window_center_time <= event_time + post_event):  # post_event is negative
                     label = 2
                     break
             
-            # Skip ambiguous baseline near any event
+            # Ensure baseline is truly clean - not near any event
             if label == 0:  # baseline candidate
                 if len(self.all_confusion_events) > 0:
                     all_times = np.array([t for t, _ in self.all_confusion_events])
-                    if np.min(np.abs(all_times - window_center_time)) < 0.75:
-                        continue  # do not use this as clean baseline
+                    if np.min(np.abs(all_times - window_center_time)) < safety_margin:
+                        continue  # Skip this window - too close to an event
             
             # Extract features
             features = self.extract_features(window)
@@ -203,6 +233,26 @@ class ConfusionMLDetector:
         
         X = np.array(X)
         y = np.array(y)
+        timestamps_array = np.array(timestamps_list)
+        
+        # Downsample baseline class to reduce imbalance
+        if downsample_baseline_ratio is not None:
+            baseline_idx = np.where(y == 0)[0]
+            positive_idx = np.where(y > 0)[0]
+            
+            if len(baseline_idx) > 0 and len(positive_idx) > 0:
+                max_baseline = len(positive_idx) * downsample_baseline_ratio
+                
+                if len(baseline_idx) > max_baseline:
+                    print(f"\nDownsampling baseline: {len(baseline_idx)} -> {int(max_baseline)}")
+                    # Random sample of baseline indices
+                    np.random.seed(42)  # For reproducibility
+                    keep_baseline = np.random.choice(baseline_idx, int(max_baseline), replace=False)
+                    keep_idx = np.sort(np.concatenate([keep_baseline, positive_idx]))
+                    
+                    X = X[keep_idx]
+                    y = y[keep_idx]
+                    timestamps_array = timestamps_array[keep_idx]
         
         # Print class distribution
         unique, counts = np.unique(y, return_counts=True)
@@ -211,7 +261,7 @@ class ConfusionMLDetector:
             class_name = ['Baseline', 'Word Confusion', 'Sentence Confusion'][cls]
             print(f"  {class_name}: {count} samples ({count/len(y)*100:.1f}%)")
         
-        return X, y, np.array(timestamps_list)
+        return X, y, timestamps_array
     
     def train_classifier(self, X, y, model_type='xgboost'):
         """Train and evaluate classifier"""
@@ -469,8 +519,6 @@ class ConfusionMLDetector:
         
         # 5. Feature Importance (Top 15)
         ax5 = plt.subplot(3, 3, (5, 6))
-        # 5. Feature Importance (Top 15)
-        ax5 = plt.subplot(3, 3, (5, 6))
         top_n = 15
         indices = np.argsort(results['feature_importances'])[::-1][:top_n]
         
@@ -528,14 +576,6 @@ class ConfusionMLDetector:
         for ch in self.channels:
             ch_features = [i for i, name in enumerate(results['feature_names']) if name.startswith(ch)]
             channel_importance[ch] = np.mean(results['feature_importances'][ch_features])
-        # 8. Channel Contribution Analysis
-        ax8 = plt.subplot(3, 3, 9)
-        
-        # Calculate average importance per channel
-        channel_importance = {}
-        for ch in self.channels:
-            ch_features = [i for i, name in enumerate(results['feature_names']) if name.startswith(ch)]
-            channel_importance[ch] = np.mean(results['feature_importances'][ch_features])
         
         channels = list(channel_importance.keys())
         importances = list(channel_importance.values())
@@ -545,8 +585,6 @@ class ConfusionMLDetector:
         ax8.set_ylabel('Average Feature Importance')
         ax8.set_title('Channel Contribution to Detection')
         ax8.grid(True, alpha=0.3, axis='y')
-        
-        # Note: Frequency band importance plot removed to make room for PR curve
         
         plt.tight_layout()
         plt.show()
@@ -650,12 +688,14 @@ def main():
     detector = ConfusionMLDetector(filepath)
     
     # Create dataset with sliding windows
-    # Using longer pre-event window to account for human reaction time
+    # CRITICAL CHANGE: Windows now capture confusion BEFORE the keypress
     X, y, timestamps = detector.create_dataset(
-        window_size=1.0,    # 1 second windows
-        stride=0.1,         # 100ms stride for overlap
-        pre_event=1.0,      # Include 1.0s before event (reaction time)
-        post_event=0.7      # Include 0.7s after event
+        window_size=1.0,          # 1 second windows
+        stride=0.1,               # 100ms stride for overlap
+        pre_event=2.0,            # Look 2s before the keypress
+        post_event=-0.3,          # End window 0.3s before keypress (avoids motor prep)
+        safety_margin=1.0,        # Keep baseline 1s away from any event
+        downsample_baseline_ratio=3  # Limit baseline to 3x positive samples
     )
     
     # Train and evaluate
@@ -669,10 +709,15 @@ def main():
     print("="*60)
     print("\nThe model has been trained to detect confusion events.")
     print("Check the visualizations for detailed performance metrics.")
-    print("\nTo improve accuracy:")
-    print("  • Collect more training data")
+    print("\nImproved pipeline:")
+    print("  • Confusion windows now EXCLUDE keypress (avoids motor artifacts)")
+    print("  • Added 60/120 Hz notch filters for powerline noise")
+    print("  • Downsampled baseline for better class balance")
+    print("  • True baseline kept 1s away from any event")
+    print("\nTo improve accuracy further:")
+    print("  • Collect more training data across multiple sessions")
     print("  • Mark events more precisely when confused")
-    print("  • Try different window sizes and features")
+    print("  • Consider adding fNIRS features if hemodynamic response is relevant")
     print("  • Ensure good electrode contact during recording")
 
 if __name__ == "__main__":

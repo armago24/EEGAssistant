@@ -3,6 +3,7 @@
 Visualizer for Muse S Athena with EEG and fNIRS (optics) data
 Modified for ML training with confusion detection and text display
 Saves data as NPZ files with event timestamps
+Now includes cursor tracking to identify which word is being read
 """
 
 import socket
@@ -33,39 +34,43 @@ import sys
 
 # Training text with deliberately confusing elements
 TRAINING_TEXTS = [
-"""People trust their sense of timing until a metronome exposes how elastic it really is. Walkers who think they stride a steady beat find their pace drifting when a mild slope, a shadow, or a stray conversation pulls attention sideways. The mind predicts each interval by blending recent experience with an internal baseline, a quiet form of Bayesian smoothing that feels like common sense. Yet when the environment supplies an extra cue, such as the click of a turn signal or the hush of a library, people sometimes become less accurate, not more, because the added cue competes with the one they were already using. The result is not chaos but a small, lawful bias, a kind of cognitive parallax that can be measured. Even the breath couples to these judgments: exhalation lengthens perceived time a little, as if respiration were a metronome’s hidden escapement. A rare gust of anxiety can do the opposite, tightening the seconds like a drumhead, a mild form of tachypsychia.""",
+"""Physics starts by telling you to pick a frame of reference and stick to it. An inertial frame is one in which a free object moves at constant velocity unless acted upon, and that is the stage on which the principle of relativity is stated. Two observers moving at a steady relative speed will both describe the same laws of nature, even though they disagree about lengths, times, and whether two distant events were simultaneous. This is not a philosophical quibble; it follows from experiments with light pulses that reveal a hard speed limit baked into the structure of space and time. When you accept that limit, you trade an absolute “now” for a geometry where intervals depend on who measures them, and simultaneity becomes frame-bound rather than universal.""",
 
-"""A physical pendulum seems simpler. Give it a push, watch it swing, and the period follows straightforward rules about length and gravity. But real pendulums live in air, pick up minute torques, and pass through magnetic fields that trace faint, invisible isogons. At tiny amplitudes the motion tends toward linearity; at larger arcs the approximation frays, and the period stretches. Counterintuitively, observing more closely can, in delicate setups, change the motion itself: light needed to measure the bob imparts momentum, and a warm sensor ever so slightly stirs the plenum it sits in. Engineers work around this with baffling, damping, and isolation, but the act of mitigation alters the system they intend to leave untouched. Add a second pendulum coupled by a spring and the rhythms sometimes synchronize spontaneously, while a slight, deliberate detuning keeps them independent longer than intuition predicts. Diminish friction too far, and the system becomes so sensitive that a whisper of turbulence inoculates it against neat prediction.""",
+"""Time dilation is the cleanest starting point. Imagine a clock that counts ticks by bouncing light between mirrors. An observer riding with the clock sees a straight up-and-down path, but an observer who watches it fly past sees the light take a diagonal path and therefore a longer trip between ticks. Because the speed of light is the same for both, the moving clock must tick more slowly. The stretch factor connects directly to measured speeds and shows up everywhere from high-energy particle lifetimes to the rhythms of fast muons in the atmosphere. You do not need exotic devices to see the effect; precise atomic clocks flown on airplanes return with offset readings that match the predicted dilation within experimental uncertainty.""",
 
-"""Language, which feels solid in the mouth, is equally slippery when watched too closely. People imagine that spelling mirrors speech, yet orthography lags and resists like a stubborn rheology. Pronunciations drift; letters fossilize; pragmatic conventions patch the gaps. The human ear parses syllables with quick heuristics, treating similar sounds as the same until a context demands sharper boundaries. When a community standardizes a new spelling, readers often hear a “new” pronunciation that was already there, just unnoticed, as though print retrofitted the sound. The reverse also occurs: a change in everyday speech makes an old spelling look suddenly perverse, though it had long served as a serviceable palimpsest of history. In classrooms, a well-meant focus on rules can briefly slow fluency, because rule rehearsal competes with the automaticity fluent reading relies on. Later, the same rules help resolve ambiguity more quickly, a delayed benefit that feels like a release of cognitive viscosity.""",
+"""Length contraction is the flip side. A meter stick that rushes by you along its length measures shorter than when it sits still next to you, provided you define the ends at the same instant in your frame. That last clause matters, because in another frame “the same instant” slices the motion differently. The contraction is not damage or compression; it is a statement about how simultaneous positions are chosen when two observers do bookkeeping in relative motion. If you align procedures carefully, the contraction and the dilation line up so that no material paradox remains, and objects pass through doorways they could not fit at rest only for observers who see them moving. For riders traveling with the stick, nothing special happens at all.""",
 
-"""Walk a forest edge and the boundary looks crisp, but ecology hides in gradients. The soil shifts from loam to sand; light angles change; a damp ecotone emerges where moss keeps its own calendar. Fungal threads weave through roots in a mutable mycelium, trading minerals for sugars with a logic that seems like commerce but follows chemical gradients and stochastic proximity. Plants that appear isolated in plain view share resources through these filaments, and sometimes starve neighbors through allelopathy without ever “deciding” anything. Disturbance complicates the picture: a small fire or a fallen tree can raise diversity for a time, opening space without erasing memory, while an unusually gentle decade may reduce variety by allowing the most competitive species to overspread. A longer drought can reverse that pattern again, pruning dominants and letting tenacious colonists gain a foothold. Landscapes do not seek balance; they exhibit homeostasis only over intervals that later prove local, a moving equilibrium with lacunarity.""",
+"""Velocities do not add the way they do in everyday life. If one spacecraft throws a probe forward and both speeds are high, the resulting speed is still bounded below the speed of light because the combination rule is nonlinear. The algebra can be packaged using a parameter called rapidity, which adds like ordinary angles while keeping speeds safe. This structure prevents any observer from catching up to a light pulse and preserves causality across frames. You can test the rule with beams in a particle accelerator, where sequential “pushes” never produce a speed that breaks the cosmic limit, even though the energy and momentum continue to rise without bound.""",
 
-"""In mathematics, symmetry suggests constraint, and constraint suggests fewer possibilities. Yet patterns on a plane show the opposite more often than expected. Requiring a tiling to avoid periodic repetition narrows the allowable shapes, but the resulting mosaics can explode in variety, assembling order from rules that forbid too much order. A single shape can force nonrepeating coverage, an aperiodic monotile that looks simple until its neighborhood rules conspire to make long-range echoes without a fundamental repeat. Some tilings carry rotational symmetries of high dihedral order while refusing to translate neatly; their patches align like quasicrystals, showing sharp diffraction without lattice repetition. Add one gentle condition—say, a bound on angles at each vertex—and the counting problem can get harder, not easier, because the space of legal configurations becomes thin and brittle. Then, paradoxically, a stricter bound can make enumeration tractable again by slicing away troublesome, fractal-edged cases with a clean apothem.""",
+"""Energy and momentum fit together as components of a single four-vector, and their combined magnitude is invariant even though each piece changes between frames. Rest energy is the part that remains when an object is not moving relative to you, and kinetic energy is what appears as motion in your frame. Collisions become simpler when treated with this unified bookkeeping: what looks like lost kinetic energy in one description shows up as new mass in another, or as internal energy such as heat or vibration. The invariant also makes decay chains tractable, because you can compute allowed products without guessing detailed mechanisms, a method that experimentalists rely on when matching detector signatures to underlying interactions.""",
 
-"""Consider heat moving through a house on a still winter night. Insulation slows conduction, air sealing tamps down convection, and radiant barriers reflect long-wave energy. If a wall segment remains uninsulated—a thermal bridge—heat finds that shortcut first. Seal only the obvious gaps, and the remaining leaks draw stronger pressure differences that pull cold air through hidden chases. People assume that any added insulation monotonically reduces heat loss, yet partial upgrades can reorganize the flow field and temporarily increase convective cycling in an attic plenum, raising ice dam risk even as the average temperature rises. The remedy is not to avoid improvement but to match the interventions: balance ventilation, eliminate bridging, and keep vapor drive within safe limits so enthalpy gradients do not deposit moisture where wood fibers are most hygroscopic. In mild climates, the same strategies can overshoot, trapping heat in shoulder seasons and making natural stack effects do the unwanted work of a fan.""",
+"""Spacetime diagrams help you see all of this at once. Plot time vertically and space horizontally, and the worldline of a light flash always lies at forty-five degrees. Tilting your axes to represent a new constant-velocity frame acts like a hyperbolic rotation, keeping light lines fixed while trading time and space in a controlled way. The “distance” that stays the same under these rotations is the spacetime interval, which can be timelike, spacelike, or lightlike depending on whether one event can influence another. Causal structure then becomes a matter of geometry: if your worldline cannot reach a point without crossing a light line, no signal can reach it either, no matter how ingenious the mechanism.""",
 
-"""Rivers teach the same lesson with water instead of air. A channel carves its path by balancing gravity, bank strength, and sediment load, and the deepest line—the thalweg—meanders even in a uniform valley. Flow near the bed spirals in helical cells that move sand sideways as much as downstream, sculpting point bars and undercutting bends until an oxbow lake peels away. Straightening a reach makes it safer for a season, but the new speed amplifies scour downstream, trading one hazard for another. Add levees, and floods grow taller while visiting less often, storing risk for a future day when the crest exceeds the design crest by inches and the last ditch fails. Conversely, a small setback of banks and a roughened floodplain can slow high water enough to lower peaks without changing the valley’s average discharge at all. The sediment budget keeps its own ledger, where a single storm can erase a decade of gradual aggradation.""",
+"""Acceleration complicates the picture because an accelerating observer is not confined to a single inertial frame. The useful quantity becomes proper acceleration, which is what an onboard accelerometer reads. A path with constant proper acceleration draws a hyperbola in a spacetime diagram and creates a horizon behind the traveler, a boundary beyond which events can no longer send signals that catch up. Clocks carried by such an observer still measure their own proper time smoothly, but comparisons with clocks at rest or in other motions must be done segment by segment. This is why the so-called twin scenario is asymmetric: the traveling twin’s path includes changing frames, and the difference in accumulated proper time follows from the geometry of the two worldlines, not from any literal injury to a clock.""",
 
-"""In markets, people chase efficiency with the same confidence engineers chase laminar flow, and they run into comparable surprises. Raising a price usually lowers demand, but goods with strong signaling value or poor substitutes can bend that curve, making elasticity look piecewise rather than smooth. Incentives rescue many problems, though not the ones that change how an activity is perceived. A tiny payment for a task that once felt meaningful can crowd out the intrinsic draw, shrinking participation even as the budget increases. Remove the payment later, and participation may not rebound, because the task now carries the odor of a chore. At the same time, modest, nonmonetary recognition can expand effort beyond what the recognition could “buy,” much like a catalyst that shifts a reaction pathway without appearing in the final products. Systems that appear to need precision sometimes prefer coarse rules that participants can predict, because predictable imperfections reduce strategic oscillation.""",
+"""Gravity enters when you notice that acceleration and a uniform gravitational field feel the same locally. If you are sealed in a small elevator, you cannot, by any local test, tell whether the floor pushes up because of rocket thrust or because you sit on a planet. That equivalence guides you to model gravity not as a force in the usual sense but as curvature of spacetime that tells free bodies how to move. Light follows the straightest possible path available—called a geodesic—even though that path can bend when space and time themselves are curved. A clock lower in a gravitational potential runs a bit slow compared to a higher one, an effect that shows up in frequency shifts of light climbing out of a field and in the different tick rates of clocks at different altitudes.""",
 
-"""Music offers a cleaner test bed for intention and outcome. A player keeps tempo, adjusts dynamics, and shapes phrases, yet ensemble tightness often improves when nobody “tries” to lead. Microdelays created by room acoustics make individual entries appear tardy to some ears and early to others, and still the group converges. Counterintuitively, slightly higher reverberation can make timing feel crisper, because sustained sound stitches small gaps, turning discrete attacks into a perceived continuum. Meanwhile, instruments that share a tuning system collide in subtle ways: equal temperament equalizes semitones but spreads minute beating across every interval, while just intonation perfects some chords at the expense of others. Performers learn to shade pitches to minimize roughness, a live compromise that theory books relegate to footnotes. Spectators think the melody carries the day; performers know the inaudible floor of overtones, infrasound stage rumble, and psychoacoustic masking can sway the emotional arc more than an extra decibel.""",
+"""Curvature is not a matter of stretching a rubber sheet; it is about how vectors change when you move them around a closed loop. On a sphere, carry a pointing arrow while walking a triangle and you return with the arrow rotated, even though you never twisted it in your hand. The same idea in spacetime is captured by a curvature tensor, which quantifies how nearby free-falling paths converge or diverge. Those relative accelerations are what we call tides, and they are the part of gravity that cannot be transformed away by switching to a freely falling frame. In regions with strong curvature, the separation between two falling objects can change dramatically even if both are weightless in their instantaneously comoving frames.""",
 
-"""On a calm beach, waves look predictable until you try to model them. Shallow water transforms long swells into breaking crests as dispersion slows the troughs and steepens the face, and a sandbar acts like a prism for wavelengths. Two trains of similar period combine to beat against each other, making sets that surfers count as if they had agency. Add wind fetched over miles, and capillary ripples ride along the larger gravity waves, changing the surface roughness that the wind then grips. Sometimes damping the wind locally with a breakwater increases the height of waves on the far side by changing interference patterns, producing a lee that is not actually calmer. Sediment moves in pulses that lag behind storms, so a beach can shrink after fair weather and rebuild in wild months, an inversion driven by the direction of peak energy. The shoreline is a memory device with poor foresight but excellent archival fidelity.""",
+"""For a non-rotating, spherically symmetric mass, there is a simple exact description that predicts several measurable effects. Orbits precess a little each revolution compared to the Newtonian expectation, light rays bend as they pass by, and signals take slightly longer to travel near the mass than straightforward geometry would suggest. The slowing of time becomes more severe as you approach the radius where escape would require light speed, which is the location of an event horizon. None of this means an object feels a sudden wall at that radius; locally the crossing is uneventful if the mass is large enough to keep tidal forces modest over human scales. The critical differences emerge when you compare notes between distant observers who cannot agree on which events can still exchange signals.""",
 
-"""Attention flickers like a candle, yet people navigate crowded sidewalks without colliding most of the time. The brain blends motion vectors, obstacle predictions, and a soft rule that keeps right-of-way ambiguous enough for last-second negotiation. Give walkers explicit lanes and some will resist, paradoxically increasing near-misses as they assert priority that the old ambiguity dissolved. At intersections, eye contact can reduce safety when it conveys false assurance, especially where curb geometry invites late decisions. The trick is not to remove clarity but to place it where it changes behavior before commitment—far enough upstream that course corrections are cheap. This is why a small change in texture underfoot, a tactile rille that hints at an edge, can outperform another sign. People like to credit their conscious monitoring; most of the benefit comes from constraints that make dangerous moves feel effortful, an embodied form of friction that encourages smoother flow without explicit instruction.""",
+"""Black holes add a few striking structures to that baseline. Just outside the horizon in the simple case lies a circular path for light itself, often called a photon sphere, where a light ray can orbit precariously before peeling away. Closer in, no circular orbit for material bodies is stable, so disks of gas around compact objects have an inner edge that sets how bright they can become when accreting. Rotation introduces additional behavior: spacetime is dragged around the spinning mass, allowing orbits that would be impossible otherwise and slightly shifting the positions of these characteristic radii. None of these features allow energy or information to leak out from within the horizon, but they shape the radiation produced outside it in ways telescopes can test.""",
 
-"""At night, the sky looks fixed, but sight itself changes over minutes. Cones in the retina hand off to rods as light dims, shifting sensitivity toward wavelengths that daytime color names conceal. During full dark adaptation, scotopic vision sharpens detection of faint objects at the cost of detail and hue, and averted gaze helps because the most rod-rich region sits off center. Amateur observers learn that a dim red lamp, which seems like a compromise, can improve accuracy: it preserves rod sensitivity while giving enough light for charts, so the overall session yields more. Telescopes obey similar tradeoffs. A larger aperture gathers more light and resolution, but turbulent air smears the image into a seeing disk that makes magnification moot beyond a threshold. On rare, steady nights the limit drops back to optics and focus tolerance; on most nights the atmosphere sets a ceiling that training can approach but never exceed. The Moon’s umbra during an eclipse makes the lesson literal: the shadow moves with planetary geometry, not with the drama human eyes project onto it, while surface albedo changes make the Earth’s edge look crisp or ragged depending on cloud bands that observers cannot control.""",
+"""Gravitational waves are ripples in spacetime curvature that carry energy away from accelerating masses, especially when the mass distribution changes shape in a lopsided way. Two dense objects in a tight orbit emit these waves and slowly spiral together as they lose orbital energy, speeding up and strengthening the signal until they collide. Detectors on Earth measure a tiny strain—fractional changes in length far smaller than a proton diameter—by comparing the travel times of laser light along long, perpendicular arms. The pattern encodes the masses and spins of the sources. The fact that the waves travel at light speed and match predictions across many events is an independent confirmation that the underlying theory is not just a clever rephrasing of Newtonian gravity.""",
 
-"""Throughout these examples, a pattern returns. Systems invite intervention, but they also route around it, carrying inertia and feedback that reward modesty. More measurement can help, but the process may alter what is being measured in small, lawful ways. Rules clarify, and sometimes they constrain the exact capacities they aim to amplify. In many domains, the elegant path is not the straightest but the one that leaves enough slack for adjustment, the slack that keeps oscillations from growing. Even when outcomes look perverse, they often track hidden gradients—of pressure, information, energy, or incentive—that we can map with patience. When we trace those gradients carefully, the odd reversals begin to feel ordinary, like familiar riffs in a long composition. And if a conclusion seems to vanish when examined too directly, it may not be wrong; it may be built atop phenomena that need a softer gaze, the kind of attention that steadies rather than tightens.""",
+"""Relativity also shows up in everyday technology. Clocks on satellites run at different rates than clocks on the ground because they move quickly and sit higher in Earth’s gravitational potential. The motion makes them tick slow, the altitude makes them tick fast, and the net effect is a small but steady lead relative to ground clocks. If you ignored these shifts, position fixes would drift by kilometers each day. Engineers therefore adjust the onboard clock frequencies and also account for the rotation of Earth when signals traverse different paths to a receiver, a timing asymmetry known as a Sagnac correction. The practical success of these adjustments is one more reason physicists say the theory earns trust the same way any good model does: by predicting numbers that instruments later read off without drama.""",
+
+"""Electricity and magnetism reveal another unification. What one observer calls a purely electric field, another moving observer may describe as a mix of electric and magnetic fields, because charges and lengths transform when frames change. A current-carrying wire that is neutral overall in one frame can appear slightly charged in another, and the force on a test charge can switch roles between “electric” and “magnetic” without altering the underlying physics. Packaging the fields together as parts of one spacetime object makes the transformation rules simple and shows why the speed of light emerges naturally as a property of empty space rather than a detail of any particular source. The unity explains why light itself is an electromagnetic wave that propagates without needing a medium to ride on.""",
+
+"""Finally, it helps to practice with limiting cases. At speeds much smaller than the speed of light and in weak gravitational fields, all of these ideas reduce smoothly to the familiar equations you learned first. Energy becomes mostly kinetic plus a potential term, time runs essentially the same for everyone in a lab, and space can be treated as flat over rooms, campuses, and many planetary problems. Pushing beyond those limits demands new intuition, but you build it the same way you built the old kind: by drawing diagrams, checking units, comparing frames, and following the math where it leads. The goal is not to memorize exotic effects; it is to see that they are ordinary once you accept the geometry that space and time together require.""",
 ]
 
 class TeleprompterWindow:
-    """Separate window for displaying text in large format"""
+    """Separate window for displaying text in large format with cursor tracking"""
     def __init__(self, parent_visualizer):
         self.parent = parent_visualizer
         self.root = tk.Tk()
-        self.root.title("📖 READING MATERIAL - Confusion Detection Training")
+        self.root.title("👁 READING MATERIAL - Confusion Detection Training")
         
         # Make window large
         self.root.geometry("1200x800")
@@ -74,6 +79,11 @@ class TeleprompterWindow:
         # Track if window is active
         self.active = True
         
+        # Cursor tracking variables
+        self.current_word = ""
+        self.cursor_update_interval = 50  # milliseconds
+        self.last_cursor_update = 0
+        
         # Header frame
         header_frame = tk.Frame(self.root, bg='#1a1a1a', height=80)
         header_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
@@ -81,7 +91,7 @@ class TeleprompterWindow:
         
         # Title label
         title_label = tk.Label(header_frame, 
-                               text="📖 CONFUSION DETECTION TRAINING",
+                               text="👁 CONFUSION DETECTION TRAINING",
                                font=('Arial', 24, 'bold'),
                                fg='#FFD93D',
                                bg='#1a1a1a')
@@ -89,7 +99,7 @@ class TeleprompterWindow:
         
         # Instructions label
         instructions = tk.Label(header_frame,
-                               text="Press C for word confusion | Press S for sentence confusion",
+                               text="Press C for word confusion | Press S for sentence confusion | Cursor tracks current word",
                                font=('Arial', 14),
                                fg='#4ECDC4',
                                bg='#1a1a1a')
@@ -120,7 +130,7 @@ class TeleprompterWindow:
         self.text_display.config(state=tk.DISABLED)
         
         # Status frame
-        status_frame = tk.Frame(self.root, bg='#1a1a1a', height=100)
+        status_frame = tk.Frame(self.root, bg='#1a1a1a', height=120)
         status_frame.pack(fill=tk.X, padx=10, pady=(5, 10))
         status_frame.pack_propagate(False)
         
@@ -133,7 +143,7 @@ class TeleprompterWindow:
         self.text_status.pack(side=tk.LEFT, padx=20, pady=10)
         
         self.recording_status = tk.Label(status_frame,
-                                        text="⏸ NOT RECORDING",
+                                        text="⏺ NOT RECORDING",
                                         font=('Arial', 16, 'bold'),
                                         fg='#888888',
                                         bg='#1a1a1a')
@@ -146,17 +156,29 @@ class TeleprompterWindow:
                                     bg='#1a1a1a')
         self.event_status.pack(side=tk.LEFT, padx=20, pady=10)
         
+        # Current word label
+        self.word_status = tk.Label(status_frame,
+                                   text="Current word: -",
+                                   font=('Arial', 14, 'italic'),
+                                   fg='#FFD93D',
+                                   bg='#1a1a1a')
+        self.word_status.pack(side=tk.RIGHT, padx=20, pady=5)
+        
         # Navigation hints
         nav_label = tk.Label(status_frame,
                            text="↑/↓: Scroll | ←/→: Change Text | Space: Start/Stop Recording",
                            font=('Arial', 12),
                            fg='#888888',
                            bg='#1a1a1a')
-        nav_label.pack(side=tk.RIGHT, padx=20, pady=10)
+        nav_label.pack(side=tk.BOTTOM, padx=20, pady=5)
         
         # Bind keyboard events
         self.root.bind('<Key>', self.on_key_press)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        
+        # Bind mouse motion for cursor tracking
+        self.text_display.bind('<Motion>', self.on_mouse_motion)
+        self.text_display.bind('<Leave>', self.on_mouse_leave)
         
         # Position tracking for smooth scrolling
         self.scroll_position = 0.0
@@ -164,6 +186,74 @@ class TeleprompterWindow:
         # Update the display
         self.update_display()
         
+        # Start cursor tracking loop
+        self.track_cursor()
+        
+    def on_mouse_motion(self, event):
+        """Track mouse movement over text"""
+        current_time = time.time() * 1000  # milliseconds
+        
+        # Throttle updates to avoid excessive processing
+        if current_time - self.last_cursor_update < self.cursor_update_interval:
+            return
+            
+        self.last_cursor_update = current_time
+        
+        # Get the index at the mouse position
+        try:
+            index = self.text_display.index(f"@{event.x},{event.y}")
+            
+            # Get word boundaries at this position
+            word_start = self.text_display.index(f"{index} wordstart")
+            word_end = self.text_display.index(f"{index} wordend")
+            
+            # Extract the word
+            word = self.text_display.get(word_start, word_end).strip()
+            
+            if word and word != self.current_word:
+                self.current_word = word
+                self.word_status.config(text=f"Current word: {word}")
+                
+                # Update parent's current word
+                self.parent.current_word = word
+                
+        except Exception as e:
+            # Ignore errors from invalid positions
+            pass
+    
+    def on_mouse_leave(self, event):
+        """Handle mouse leaving the text area"""
+        self.current_word = ""
+        self.parent.current_word = ""
+        self.word_status.config(text="Current word: -")
+    
+    def track_cursor(self):
+        """Regular tracking of cursor position for recording"""
+        if self.active:
+            # Get current cursor position relative to text widget
+            try:
+                x, y = self.text_display.winfo_pointerxy()
+                widget_x = self.text_display.winfo_rootx()
+                widget_y = self.text_display.winfo_rooty()
+                
+                # Calculate relative position
+                rel_x = x - widget_x
+                rel_y = y - widget_y
+                
+                # Check if cursor is within text widget bounds
+                if (0 <= rel_x <= self.text_display.winfo_width() and 
+                    0 <= rel_y <= self.text_display.winfo_height()):
+                    
+                    # Trigger motion event processing
+                    event = type('obj', (object,), {'x': rel_x, 'y': rel_y})
+                    self.on_mouse_motion(event)
+                
+            except:
+                pass
+            
+            # Schedule next update
+            self.root.after(50, self.track_cursor)
+    
     def on_key_press(self, event):
         """Handle keyboard events in teleprompter window"""
         if event.char.lower() == 'c':
@@ -262,7 +352,7 @@ class TeleprompterWindow:
             )
         else:
             self.recording_status.config(
-                text="⏸ NOT RECORDING",
+                text="⏺ NOT RECORDING",
                 fg='#888888'
             )
     
@@ -338,6 +428,9 @@ class MuseAthenaVisualizer:
         # Text navigation for training
         self.current_text_index = 0
         
+        # Current word tracking
+        self.current_word = ""
+        
         # Color schemes
         self.eeg_colors = {
             'TP9': '#FF6B6B',
@@ -382,6 +475,7 @@ class MuseAthenaVisualizer:
         self.recorded_motion = []
         self.recorded_ref = []
         self.recorded_events = []  # List of (timestamp, event_type) tuples
+        self.recorded_words = []  # List of current words at each timestamp
         
         # For tracking the last saved data
         self.last_eeg_data = None
@@ -505,6 +599,9 @@ class MuseAthenaVisualizer:
                         self.recorded_fnirs.append(self.last_fnirs_data if self.last_fnirs_data else [np.nan] * 8)
                         self.recorded_motion.append(self.last_motion_data if self.last_motion_data else [np.nan] * 6)
                         self.recorded_ref.append(self.last_ref_data if self.last_ref_data else [np.nan] * 2)
+                        
+                        # Record current word
+                        self.recorded_words.append(self.current_word)
                     
                     # Debug first few packets
                     if self.eeg_packet_count <= 5:
@@ -668,6 +765,7 @@ class MuseAthenaVisualizer:
                 self.recorded_motion = []
                 self.recorded_ref = []
                 self.recorded_events = []
+                self.recorded_words = []  # Initialize word tracking
             
             if self.record_button:
                 self.record_button.label.set_text('Stop Recording')
@@ -681,7 +779,8 @@ class MuseAthenaVisualizer:
             print(f"\n{'='*50}")
             print(f"RECORDING STARTED at {datetime.fromtimestamp(self.recording_start_time).strftime('%Y-%m-%d %H:%M:%S')}")
             print(f"{'='*50}")
-            print("\n🎯 CONFUSION MARKERS:")
+            print("\n👁 CURSOR TRACKING ACTIVE - Recording words under cursor")
+            print("\n🤔 CONFUSION MARKERS:")
             print("  'c' = Word confusion")
             print("  's' = Sentence confusion")
             print("  '1', '2', '3' = Other markers")
@@ -702,11 +801,13 @@ class MuseAthenaVisualizer:
                     'motion': self.recorded_motion.copy(),
                     'ref': self.recorded_ref.copy(),
                     'events': self.recorded_events.copy(),
+                    'words': self.recorded_words.copy(),  # Add words data
                     'start_time': self.recording_start_time,
                     'current_text_index': self.current_text_index
                 }
                 data_points = len(self.recorded_timestamps)
                 events_count = len(self.recorded_events)
+                unique_words = len(set(w for w in self.recorded_words if w))
             
             # Update UI immediately
             if self.record_button:
@@ -720,6 +821,7 @@ class MuseAthenaVisualizer:
             print(f"Duration: {duration:.1f} seconds")
             print(f"Data points: {data_points}")
             print(f"Events marked: {events_count}")
+            print(f"Unique words tracked: {unique_words}")
             print(f"Text passage: {self.current_text_index + 1}/{len(TRAINING_TEXTS)}")
             print(f"{'='*50}")
             print("\nPreparing to save...")
@@ -741,11 +843,12 @@ class MuseAthenaVisualizer:
             
             # Special messages for confusion events
             if event_type.lower() == 'c':
-                print(f"📝 WORD confusion marked at {relative_time:.2f}s")
+                word_info = f" on '{self.current_word}'" if self.current_word else ""
+                print(f"🤔 WORD confusion marked at {relative_time:.2f}s{word_info}")
             elif event_type.lower() == 's':
                 print(f"📄 SENTENCE confusion marked at {relative_time:.2f}s")
             else:
-                print(f"🔷 Event '{event_type}' marked at {relative_time:.2f}s")
+                print(f"📌 Event '{event_type}' marked at {relative_time:.2f}s")
             
             # Update teleprompter if active
             if self.teleprompter and self.teleprompter.active:
@@ -771,6 +874,9 @@ class MuseAthenaVisualizer:
                 motion_data = np.array(save_data['motion']) if save_data['motion'] else np.array([])
                 ref_data = np.array(save_data['ref']) if save_data['ref'] else np.array([])
                 
+                # Convert words - handle string array
+                words_array = np.array(save_data['words'], dtype=object) if save_data['words'] else np.array([], dtype=object)
+                
                 # Convert events
                 if save_data['events']:
                     event_timestamps = np.array([e[0] for e in save_data['events']])
@@ -791,6 +897,7 @@ class MuseAthenaVisualizer:
                     'sample_rate': self.sample_rate,
                     'total_samples': len(timestamps),
                     'total_events': len(save_data['events']),
+                    'unique_words_tracked': len(set(w for w in save_data['words'] if w)),
                     'text_passage_index': save_data['current_text_index'],
                     'text_passage': TRAINING_TEXTS[save_data['current_text_index']],
                     'eeg_channels': ['TP9', 'AF7', 'AF8', 'TP10'],
@@ -817,6 +924,7 @@ class MuseAthenaVisualizer:
                     ref=ref_data,
                     event_timestamps=event_timestamps,
                     event_types=event_types,
+                    words=words_array,  # Add words data
                     metadata=metadata
                 )
                 
@@ -830,6 +938,7 @@ class MuseAthenaVisualizer:
                 print(f"  - fNIRS data: {fnirs_data.shape if fnirs_data.size > 0 else 'None'}")
                 print(f"  - Motion data: {motion_data.shape if motion_data.size > 0 else 'None'}")
                 print(f"  - Reference data: {ref_data.shape if ref_data.size > 0 else 'None'}")
+                print(f"  - Word tracking: {len(words_array)} samples")
                 print(f"  - {len(event_timestamps)} events marked")
                 print(f"  - Text passage: {save_data['current_text_index'] + 1}/{len(TRAINING_TEXTS)}")
                 
@@ -838,15 +947,23 @@ class MuseAthenaVisualizer:
                     unique_events, counts = np.unique(event_types, return_counts=True)
                     for event, count in zip(unique_events, counts):
                         if event.lower() == 'c':
-                            print(f"  📝 Word confusion: {count} times")
+                            print(f"  🤔 Word confusion: {count} times")
                         elif event.lower() == 's':
                             print(f"  📄 Sentence confusion: {count} times")
                         else:
-                            print(f"  🔷 Event '{event}': {count} times")
+                            print(f"  📌 Event '{event}': {count} times")
+                
+                # Word tracking summary
+                unique_words = set(w for w in words_array if w)
+                if unique_words:
+                    print(f"\nWord Tracking Summary:")
+                    print(f"  - {len(unique_words)} unique words tracked")
+                    print(f"  - Most common words: {', '.join(list(unique_words)[:10])}")
                 
                 print(f"\nTo load this data:")
                 print(f"  data = np.load('{os.path.basename(filename)}')")
                 print(f"  eeg = data['eeg']")
+                print(f"  words = data['words']")
                 print(f"  events = data['event_timestamps']")
                 print(f"  metadata = data['metadata'].item()")
                 print(f"{'='*50}\n")
@@ -874,7 +991,7 @@ class MuseAthenaVisualizer:
         root.attributes('-topmost', True)
         root.focus_force()
         
-        default_name = f"muse_athena_confusion_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        default_name = f"muse_athena_confusion_words_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         filename = filedialog.asksaveasfilename(
             parent=root,
             initialdir=os.path.expanduser("~/Downloads"),
@@ -901,6 +1018,7 @@ class MuseAthenaVisualizer:
                 'motion': self.recorded_motion,
                 'ref': self.recorded_ref,
                 'events': self.recorded_events,
+                'words': self.recorded_words,
                 'start_time': self.recording_start_time,
                 'current_text_index': self.current_text_index
             }
@@ -919,6 +1037,7 @@ class MuseAthenaVisualizer:
             fnirs_data = np.array(save_data['fnirs']) if save_data['fnirs'] else np.array([])
             motion_data = np.array(save_data['motion']) if save_data['motion'] else np.array([])
             ref_data = np.array(save_data['ref']) if save_data['ref'] else np.array([])
+            words_array = np.array(save_data['words'], dtype=object) if save_data['words'] else np.array([], dtype=object)
             
             if save_data['events']:
                 event_timestamps = np.array([e[0] for e in save_data['events']])
@@ -937,6 +1056,7 @@ class MuseAthenaVisualizer:
                 'sample_rate': self.sample_rate,
                 'total_samples': len(timestamps),
                 'total_events': len(save_data['events']),
+                'unique_words_tracked': len(set(w for w in save_data['words'] if w)),
                 'text_passage_index': save_data['current_text_index'],
                 'text_passage': TRAINING_TEXTS[save_data['current_text_index']]
             }
@@ -951,6 +1071,7 @@ class MuseAthenaVisualizer:
                 ref=ref_data,
                 event_timestamps=event_timestamps,
                 event_types=event_types,
+                words=words_array,
                 metadata=metadata
             )
             
@@ -1249,7 +1370,7 @@ class MuseAthenaVisualizer:
                                    if event_type.lower() == 's')
             other_count = len(self.recorded_events) - word_confusion - sentence_confusion
             
-            self.axes['info'].text(0.1, y_pos, f'📝 Word: {word_confusion}', 
+            self.axes['info'].text(0.1, y_pos, f'🤔 Word: {word_confusion}', 
                                  fontsize=9, color='#ffaa44',
                                  transform=self.axes['info'].transAxes)
             y_pos -= 0.04
@@ -1258,10 +1379,21 @@ class MuseAthenaVisualizer:
                                  transform=self.axes['info'].transAxes)
             y_pos -= 0.04
             if other_count > 0:
-                self.axes['info'].text(0.1, y_pos, f'🔷 Other: {other_count}', 
+                self.axes['info'].text(0.1, y_pos, f'📌 Other: {other_count}', 
                                      fontsize=9, color='#66aaff',
                                      transform=self.axes['info'].transAxes)
                 y_pos -= 0.04
+        
+        # Current word
+        y_pos -= 0.04
+        if self.current_word:
+            self.axes['info'].text(0.1, y_pos, f'Word: {self.current_word[:15]}', 
+                                 fontsize=9, color='#FFD93D',
+                                 transform=self.axes['info'].transAxes)
+        else:
+            self.axes['info'].text(0.1, y_pos, 'Word: -', 
+                                 fontsize=9, color='#aaaaaa',
+                                 transform=self.axes['info'].transAxes)
         
         # Text info
         y_pos -= 0.04
@@ -1380,12 +1512,12 @@ class MuseAthenaVisualizer:
     def start(self):
         """Start the visualizer"""
         print("\n" + "="*60)
-        print("   MUSE S ATHENA - CONFUSION DETECTION TRAINING MODE")
+        print("   MUSE S ATHENA - CONFUSION DETECTION WITH WORD TRACKING")
         print("="*60)
-        print(f"\n🧠 Listening for OSC data on UDP port {self.port}")
-        print("\n📚 TRAINING MODE ACTIVE")
-        print("\n🎯 CONFUSION MARKERS (use in teleprompter window):")
-        print("  'c' = Word confusion (when a word is confusing)")
+        print(f"\n📡 Listening for OSC data on UDP port {self.port}")
+        print("\n👁 WORD TRACKING MODE ACTIVE")
+        print("\n🤔 CONFUSION MARKERS (use in teleprompter window):")
+        print("  'c' = Word confusion (tracks current word under cursor)")
         print("  's' = Sentence confusion (when a sentence doesn't make sense)")
         print("  '1','2','3' = Other event markers")
         
@@ -1394,25 +1526,28 @@ class MuseAthenaVisualizer:
         print("  ←/→ = Previous/Next text passage")
         print("  Space = Start/Stop recording")
         print("  +/- = Increase/decrease font size")
+        print("  Cursor tracks which word you're reading")
         
         print("\n🖥️ VISUALIZER CONTROLS:")
         print("  '+'/'-' = Increase/decrease time window")
         print("  'r' = Reset buffers")
         print("  'q' = Quit (saves data if recording)")
         
-        print("\n💾 DATA COLLECTION:")
+        print("\n📊 DATA COLLECTION:")
         print("  1. Teleprompter window will open automatically")
         print("  2. Click 'Begin Recording' or press Space to start")
         print("  3. Read the displayed text carefully")
-        print("  4. Press 'c' when confused by a word")
-        print("  5. Press 's' when a sentence is confusing")
-        print("  6. Click 'Stop Recording' to save data")
-        print("  7. Data auto-saves on exit if recording")
+        print("  4. Your cursor position tracks which word you're reading")
+        print("  5. Press 'c' when confused by a word")
+        print("  6. Press 's' when a sentence is confusing")
+        print("  7. Click 'Stop Recording' to save data")
+        print("  8. Data auto-saves on exit if recording")
         
-        print("\n🔬 DATA FORMAT:")
+        print("\n💾 DATA FORMAT:")
         print("  • EEG: 4 channels (TP9, AF7, AF8, TP10)")
         print("  • fNIRS: 8 values (4 normalized + 4 raw)")
         print("  • Events: Timestamped confusion markers")
+        print("  • Words: Current word under cursor for each sample")
         print("  • Text: Which passage was being read")
         
         # Start UDP receiver
@@ -1434,7 +1569,7 @@ class MuseAthenaVisualizer:
         self.setup_visualization()
         
         # Create and open teleprompter window
-        print("\n📖 Opening teleprompter window...")
+        print("\n🖥️ Opening teleprompter window...")
         self.teleprompter = TeleprompterWindow(self)
         
         # Start teleprompter update loop
@@ -1499,7 +1634,7 @@ class MuseAthenaVisualizer:
         )
         
         print("\n✅ Visualization started!")
-        print("📖 Teleprompter window should be open - focus it to use controls")
+        print("🖥️ Teleprompter window should be open - focus it to use controls")
         print("First 5 EEG and fNIRS packets will be printed for verification.")
         print("\n" + "="*60)
         

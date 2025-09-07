@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-ML-based EEG Confusion Detector
-Trains a classifier to detect confusion events from EEG data
+Word-Level EEG/fNIRS Confusion Detector
+Trains a model to identify which specific words cause confusion
+Uses both EEG and fNIRS data for better detection
 """
 
 import numpy as np
@@ -9,18 +10,18 @@ import matplotlib.pyplot as plt
 from scipy import signal, stats
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.preprocessing import StandardScaler
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.metrics import classification_report, confusion_matrix, roc_curve, auc
-from sklearn.decomposition import PCA
 import xgboost as xgb
+from collections import defaultdict
 import warnings
 warnings.filterwarnings('ignore')
 
-class ConfusionMLDetector:
+class WordConfusionDetector:
     def __init__(self, filepath):
         """Initialize and load data"""
         print(f"\n{'='*60}")
-        print("ML-BASED EEG CONFUSION DETECTOR")
+        print("WORD-LEVEL CONFUSION DETECTOR")
         print(f"{'='*60}\n")
         
         # Load data
@@ -30,56 +31,89 @@ class ConfusionMLDetector:
         # Extract arrays
         self.timestamps = self.data['timestamps']
         self.eeg = self.data['eeg']
+        self.fnirs = self.data['fnirs'] if 'fnirs' in self.data else None
+        self.motion = self.data['motion'] if 'motion' in self.data else None
+        
+        # Event data - now includes clicked words
         self.event_timestamps = self.data['event_timestamps']
         self.event_types = self.data['event_types']
+        self.event_words = self.data['event_words'] if 'event_words' in self.data else None
         
-        # NOTE: fNIRS, motion, and ref data are saved but not currently used in features
-        # Could add: slow hemodynamic features from fNIRS, motion artifacts detection, etc.
-        # self.fnirs = self.data['fnirs'] if 'fnirs' in self.data else None
-        # self.motion = self.data['motion'] if 'motion' in self.data else None
+        # Continuous word tracking
+        self.tracked_words = self.data['words'] if 'words' in self.data else None
         
         # Metadata
         self.metadata = self.data['metadata'].item() if 'metadata' in self.data else {}
         self.sample_rate = self.metadata.get('sample_rate', 256)
         self.channels = self.metadata.get('eeg_channels', ['TP9', 'AF7', 'AF8', 'TP10'])
+        self.text_passage = self.metadata.get('text_passage', '')
         
         print(f"  Duration: {(self.timestamps[-1] - self.timestamps[0]):.1f}s")
         print(f"  Samples: {len(self.timestamps)}")
-        print(f"  Channels: {', '.join(self.channels)}")
+        print(f"  EEG Channels: {', '.join(self.channels)}")
+        if self.fnirs is not None:
+            print(f"  fNIRS Channels: {self.fnirs.shape[1]} (4 normalized + 4 raw)")
         
-        # Process events
+        # Process events and words
         self.process_events()
         
-        # Preprocess EEG
-        self.preprocess_eeg()
+        # Preprocess signals
+        self.preprocess_signals()
         
     def process_events(self):
-        """Process and categorize events"""
-        self.word_events = []
-        self.sentence_events = []
-        self.all_confusion_events = []
+        """Process clicked words and build confusion word database"""
+        self.confused_words = defaultdict(list)  # word -> list of (timestamp, type)
+        self.all_words_timeline = []  # (timestamp, word) for all tracked words
         
-        for timestamp, event_type in zip(self.event_timestamps, self.event_types):
-            if event_type.lower() == 'c':
-                self.word_events.append(timestamp)
-                self.all_confusion_events.append((timestamp, 'word'))
-            elif event_type.lower() == 's':
-                self.sentence_events.append(timestamp)
-                self.all_confusion_events.append((timestamp, 'sentence'))
+        # Process clicked confusion events
+        if self.event_words is not None:
+            print(f"\nProcessing clicked words...")
+            word_confusion_count = 0
+            sentence_confusion_count = 0
+            
+            for timestamp, event_type, word in zip(self.event_timestamps, self.event_types, self.event_words):
+                if word and isinstance(word, str) and word.strip():
+                    clean_word = word.strip().lower()
+                    
+                    if event_type == 'word_confusion':
+                        self.confused_words[clean_word].append((timestamp, 'word'))
+                        word_confusion_count += 1
+                    elif event_type == 'sentence_confusion':
+                        self.confused_words[clean_word].append((timestamp, 'sentence'))
+                        sentence_confusion_count += 1
+            
+            print(f"  Word confusion clicks: {word_confusion_count}")
+            print(f"  Sentence confusion clicks: {sentence_confusion_count}")
+            print(f"  Unique confused words: {len(self.confused_words)}")
+            
+            if self.confused_words:
+                print(f"\nTop confused words:")
+                for word, events in sorted(self.confused_words.items(), 
+                                          key=lambda x: len(x[1]), reverse=True)[:10]:
+                    print(f"  '{word}': {len(events)} times")
         
-        print(f"\nEvents found:")
-        print(f"  Word confusion: {len(self.word_events)}")
-        print(f"  Sentence confusion: {len(self.sentence_events)}")
-        print(f"  Total confusion events: {len(self.all_confusion_events)}")
+        # Build timeline of all words being read
+        if self.tracked_words is not None:
+            print(f"\nProcessing word timeline...")
+            unique_tracked = set()
+            
+            for timestamp, word in zip(self.timestamps, self.tracked_words):
+                if word and isinstance(word, str) and word.strip():
+                    clean_word = word.strip().lower()
+                    self.all_words_timeline.append((timestamp, clean_word))
+                    unique_tracked.add(clean_word)
+            
+            print(f"  Total word observations: {len(self.all_words_timeline)}")
+            print(f"  Unique words tracked: {len(unique_tracked)}")
     
-    def preprocess_eeg(self):
-        """Preprocess EEG data"""
-        print("\nPreprocessing EEG...")
+    def preprocess_signals(self):
+        """Preprocess EEG and fNIRS data"""
+        print("\nPreprocessing signals...")
         
-        # Remove DC offset
+        # EEG preprocessing
         self.eeg_processed = self.eeg - np.mean(self.eeg, axis=0)
         
-        # Apply bandpass filter (0.5-50 Hz)
+        # Bandpass filter (0.5-50 Hz)
         nyquist = self.sample_rate / 2
         low = 0.5 / nyquist
         high = 50.0 / nyquist
@@ -90,169 +124,284 @@ class ConfusionMLDetector:
                 if not np.all(np.isnan(self.eeg[:, ch])):
                     self.eeg_processed[:, ch] = signal.filtfilt(b, a, self.eeg[:, ch])
         
-        # Add notch filters for powerline noise (60 Hz and 120 Hz)
-        print("  Applying notch filters (60 Hz, 120 Hz)...")
+        # Notch filters
         for freq in [60, 120]:
-            if freq < nyquist:  # Only apply if within Nyquist frequency
+            if freq < nyquist:
                 notch_freq = freq / nyquist
                 b_notch, a_notch = signal.iirnotch(notch_freq, Q=30)
                 for ch in range(self.eeg.shape[1]):
                     if not np.all(np.isnan(self.eeg_processed[:, ch])):
                         self.eeg_processed[:, ch] = signal.filtfilt(b_notch, a_notch, self.eeg_processed[:, ch])
         
-        print("  ✔ Preprocessing complete")
+        # fNIRS preprocessing
+        if self.fnirs is not None:
+            print("  Processing fNIRS data...")
+            self.fnirs_processed = np.copy(self.fnirs)
+            
+            # Separate normalized and raw channels
+            self.fnirs_norm = self.fnirs[:, :4]  # First 4 are normalized
+            self.fnirs_raw = self.fnirs[:, 4:]   # Last 4 are raw
+            
+            # Apply lowpass filter to fNIRS (hemodynamic response is slow)
+            # Cutoff at 0.5 Hz to capture hemodynamic changes
+            if 0.5 < nyquist:
+                fnirs_low = 0.5 / nyquist
+                b_low, a_low = signal.butter(4, fnirs_low, btype='low')
+                
+                for ch in range(self.fnirs_norm.shape[1]):
+                    if not np.all(np.isnan(self.fnirs_norm[:, ch])):
+                        # Detrend first
+                        self.fnirs_norm[:, ch] = signal.detrend(self.fnirs_norm[:, ch])
+                        # Then filter
+                        self.fnirs_norm[:, ch] = signal.filtfilt(b_low, a_low, self.fnirs_norm[:, ch])
+        
+        print("  ✓ Preprocessing complete")
     
-    def extract_features(self, window_data):
-        """Extract features from an EEG window"""
+    def extract_word_features(self, word, timestamp, window_size=2.0):
+        """Extract features for a specific word occurrence
+        
+        Features include:
+        - EEG features in window around word
+        - fNIRS features (if available)
+        - Word characteristics
+        - Context features
+        """
         features = []
         
-        for ch in range(window_data.shape[1]):
-            channel_data = window_data[:, ch]
-            
-            # Time domain features
-            features.append(np.mean(channel_data))
-            features.append(np.std(channel_data))
-            features.append(np.max(np.abs(channel_data)))
-            features.append(stats.skew(channel_data))
-            features.append(stats.kurtosis(channel_data))
-            
-            # Zero-crossing rate
-            zero_crossings = np.sum(np.diff(np.sign(channel_data)) != 0)
-            features.append(zero_crossings / len(channel_data))
-            
-            # Frequency domain features
-            freqs, psd = signal.welch(channel_data, fs=self.sample_rate, 
-                                     nperseg=min(len(channel_data), 64))
-            
-            # Band powers
-            bands = {
-                'delta': (0.5, 4),
-                'theta': (4, 8),
-                'alpha': (8, 13),
-                'beta': (13, 30),
-                'gamma': (30, 50)
-            }
-            
-            for band_name, (low, high) in bands.items():
-                band_mask = (freqs >= low) & (freqs <= high)
-                band_power = np.mean(psd[band_mask]) if np.any(band_mask) else 0
-                features.append(np.log10(band_power + 1e-10))
-            
-            # Peak frequency
-            peak_freq = freqs[np.argmax(psd)] if len(psd) > 0 else 0
-            features.append(peak_freq)
-            
-            # Spectral entropy
-            psd_norm = psd / (np.sum(psd) + 1e-10)
-            spectral_entropy = -np.sum(psd_norm * np.log2(psd_norm + 1e-10))
-            features.append(spectral_entropy)
+        # Find samples in window around timestamp
+        start_time = timestamp - window_size/2
+        end_time = timestamp + window_size/2
         
-        # Inter-channel features
-        if window_data.shape[1] == 4:
-            # Frontal asymmetry (AF8 - AF7)
-            frontal_diff = np.mean(window_data[:, 2]) - np.mean(window_data[:, 1])
-            features.append(frontal_diff)
+        mask = (self.timestamps >= start_time) & (self.timestamps <= end_time)
+        window_indices = np.where(mask)[0]
+        
+        if len(window_indices) < 10:  # Need minimum samples
+            return None
+        
+        # EEG features
+        eeg_window = self.eeg_processed[window_indices]
+        
+        for ch in range(eeg_window.shape[1]):
+            channel_data = eeg_window[:, ch]
             
-            # Temporal asymmetry (TP10 - TP9)
-            temporal_diff = np.mean(window_data[:, 3]) - np.mean(window_data[:, 0])
-            features.append(temporal_diff)
+            # Time domain
+            features.extend([
+                np.mean(channel_data),
+                np.std(channel_data),
+                np.max(np.abs(channel_data)),
+                stats.skew(channel_data),
+                stats.kurtosis(channel_data)
+            ])
             
-            # Inter-channel correlation
-            for i in range(window_data.shape[1]):
-                for j in range(i+1, window_data.shape[1]):
-                    corr = np.corrcoef(window_data[:, i], window_data[:, j])[0, 1]
-                    features.append(corr if not np.isnan(corr) else 0)
+            # Frequency domain
+            if len(channel_data) >= 64:
+                freqs, psd = signal.welch(channel_data, fs=self.sample_rate, nperseg=64)
+                
+                # Band powers
+                bands = {
+                    'delta': (0.5, 4),
+                    'theta': (4, 8), 
+                    'alpha': (8, 13),
+                    'beta': (13, 30),
+                    'gamma': (30, 50)
+                }
+                
+                for band_name, (low, high) in bands.items():
+                    band_mask = (freqs >= low) & (freqs <= high)
+                    if np.any(band_mask):
+                        band_power = np.mean(psd[band_mask])
+                        features.append(np.log10(band_power + 1e-10))
+                    else:
+                        features.append(0)
+                
+                # Peak frequency and entropy
+                peak_freq = freqs[np.argmax(psd)]
+                features.append(peak_freq)
+                
+                psd_norm = psd / (np.sum(psd) + 1e-10)
+                spectral_entropy = -np.sum(psd_norm * np.log2(psd_norm + 1e-10))
+                features.append(spectral_entropy)
+            else:
+                features.extend([0] * 7)  # Placeholder for frequency features
+        
+        # fNIRS features (if available)
+        if self.fnirs is not None and hasattr(self, 'fnirs_norm'):
+            fnirs_window = self.fnirs_norm[window_indices]
+            
+            for ch in range(fnirs_window.shape[1]):
+                channel_data = fnirs_window[:, ch]
+                
+                # Basic statistics
+                features.extend([
+                    np.mean(channel_data),
+                    np.std(channel_data),
+                    np.max(channel_data) - np.min(channel_data),  # Range
+                ])
+                
+                # Slope (rate of change) - important for hemodynamic response
+                if len(channel_data) > 1:
+                    time_vector = np.arange(len(channel_data))
+                    slope, _ = np.polyfit(time_vector, channel_data, 1)
+                    features.append(slope)
+                else:
+                    features.append(0)
+                
+                # Time to peak (simplified)
+                peak_idx = np.argmax(channel_data)
+                time_to_peak = peak_idx / self.sample_rate
+                features.append(time_to_peak)
+        
+        # Inter-channel connectivity
+        if eeg_window.shape[1] == 4:
+            # Frontal asymmetry
+            frontal_alpha_left = self._get_band_power(eeg_window[:, 1], 'alpha')  # AF7
+            frontal_alpha_right = self._get_band_power(eeg_window[:, 2], 'alpha')  # AF8
+            frontal_asymmetry = (frontal_alpha_right - frontal_alpha_left) / (frontal_alpha_right + frontal_alpha_left + 1e-10)
+            features.append(frontal_asymmetry)
+            
+            # Phase synchronization between channels
+            for i in range(eeg_window.shape[1]):
+                for j in range(i+1, eeg_window.shape[1]):
+                    sync = self._phase_sync(eeg_window[:, i], eeg_window[:, j])
+                    features.append(sync)
+        
+        # Word-specific features
+        word_features = [
+            len(word),  # Word length
+            self._count_syllables(word),  # Syllable count (simplified)
+            1 if any(c.isdigit() for c in word) else 0,  # Contains number
+            1 if word in self.confused_words else 0,  # Previously confused
+            len(self.confused_words.get(word, [])),  # Times confused
+        ]
+        features.extend(word_features)
         
         return np.array(features)
     
-    def create_dataset(self, window_size=1.0, stride=0.1, pre_event=2.0, post_event=-0.3, 
-                      safety_margin=1.0, downsample_baseline_ratio=3):
-        """Create ML dataset with sliding windows
+    def _get_band_power(self, data, band):
+        """Calculate power in specific frequency band"""
+        if len(data) < 64:
+            return 0
         
-        CRITICAL CHANGE: Windows are now labeled based on whether they occur BEFORE the event,
-        not including the keypress itself to avoid motor artifacts.
+        freqs, psd = signal.welch(data, fs=self.sample_rate, nperseg=min(len(data), 64))
         
-        Args:
-            window_size: Size of each window in seconds
-            stride: Step size between windows in seconds  
-            pre_event: How far BEFORE the event to look for confusion signal (positive value)
-            post_event: End of confusion window relative to event (negative = before event)
-            safety_margin: Minimum distance from any event for baseline samples
-            downsample_baseline_ratio: Max ratio of baseline to positive samples (None = no downsampling)
-        """
-        print(f"\nCreating dataset...")
+        bands = {
+            'delta': (0.5, 4),
+            'theta': (4, 8),
+            'alpha': (8, 13),
+            'beta': (13, 30),
+            'gamma': (30, 50)
+        }
+        
+        low, high = bands[band]
+        band_mask = (freqs >= low) & (freqs <= high)
+        
+        if np.any(band_mask):
+            return np.mean(psd[band_mask])
+        return 0
+    
+    def _phase_sync(self, signal1, signal2):
+        """Calculate phase synchronization between two signals"""
+        # Simplified phase sync using correlation of instantaneous phases
+        analytic1 = signal.hilbert(signal1)
+        analytic2 = signal.hilbert(signal2)
+        
+        phase1 = np.angle(analytic1)
+        phase2 = np.angle(analytic2)
+        
+        # Phase locking value (simplified)
+        phase_diff = phase1 - phase2
+        plv = np.abs(np.mean(np.exp(1j * phase_diff)))
+        
+        return plv
+    
+    def _count_syllables(self, word):
+        """Simple syllable counter"""
+        vowels = "aeiouAEIOU"
+        count = 0
+        previous_was_vowel = False
+        
+        for char in word:
+            is_vowel = char in vowels
+            if is_vowel and not previous_was_vowel:
+                count += 1
+            previous_was_vowel = is_vowel
+        
+        return max(1, count)
+    
+    def create_word_dataset(self, window_size=2.0, include_baseline_words=True):
+        """Create dataset for word-level confusion detection"""
+        print(f"\nCreating word-level dataset...")
         print(f"  Window size: {window_size}s")
-        print(f"  Stride: {stride}s")
-        print(f"  Confusion window: -{pre_event}s to {post_event}s before keypress")
-        print(f"  (Avoiding motor artifacts by excluding keypress)")
         
-        window_samples = int(window_size * self.sample_rate)
-        stride_samples = int(stride * self.sample_rate)
-        
-        X = []  # Features
-        y = []  # Labels (0=baseline, 1=word_confusion, 2=sentence_confusion)
+        X = []
+        y = []
+        words = []
         timestamps_list = []
         
-        # Extract windows
-        for i in range(0, len(self.eeg_processed) - window_samples, stride_samples):
-            window = self.eeg_processed[i:i + window_samples]
-            window_center_time = self.timestamps[i + window_samples // 2]
+        # Process confused words (positive samples)
+        print("\nProcessing confused words...")
+        confused_count = 0
+        
+        for word, events in self.confused_words.items():
+            for timestamp, conf_type in events:
+                features = self.extract_word_features(word, timestamp, window_size)
+                if features is not None:
+                    X.append(features)
+                    # Label: 0=baseline, 1=word_confusion, 2=sentence_confusion
+                    y.append(1 if conf_type == 'word' else 2)
+                    words.append(word)
+                    timestamps_list.append(timestamp)
+                    confused_count += 1
+        
+        print(f"  Confused words processed: {confused_count}")
+        
+        # Process baseline words (negative samples)
+        if include_baseline_words and self.all_words_timeline:
+            print("\nProcessing baseline words...")
             
-            # CRITICAL CHANGE: Check if window occurs BEFORE the confusion event
-            # This captures the cognitive confusion state without motor artifacts
-            label = 0  # Default: baseline
+            # Get all confused timestamps with safety margin
+            confused_times = []
+            for events in self.confused_words.values():
+                confused_times.extend([t for t, _ in events])
+            confused_times = np.array(confused_times)
             
-            # Check word confusion events
-            for event_time in self.word_events:
-                # Window should be BEFORE the keypress to avoid motor artifacts
-                if (window_center_time >= event_time - pre_event and 
-                    window_center_time <= event_time + post_event):  # post_event is negative
-                    label = 1
-                    break
+            baseline_count = 0
+            words_seen = set()
             
-            # Check sentence confusion events (priority over word)
-            for event_time in self.sentence_events:
-                # Window should be BEFORE the keypress  
-                if (window_center_time >= event_time - pre_event and 
-                    window_center_time <= event_time + post_event):  # post_event is negative
-                    label = 2
-                    break
+            # Sample baseline words
+            for timestamp, word in self.all_words_timeline:
+                # Skip if too close to any confusion event
+                if len(confused_times) > 0:
+                    min_distance = np.min(np.abs(confused_times - timestamp))
+                    if min_distance < 3.0:  # 3 second safety margin
+                        continue
+                
+                # Skip if already seen this word many times (to avoid over-representation)
+                word_key = f"{word}_{int(timestamp/10)}"  # Group by 10s windows
+                if word_key in words_seen:
+                    continue
+                words_seen.add(word_key)
+                
+                # Skip very short words
+                if len(word) < 3:
+                    continue
+                
+                features = self.extract_word_features(word, timestamp, window_size)
+                if features is not None:
+                    X.append(features)
+                    y.append(0)  # baseline
+                    words.append(word)
+                    timestamps_list.append(timestamp)
+                    baseline_count += 1
+                    
+                    # Limit baseline samples
+                    if baseline_count >= confused_count * 2:
+                        break
             
-            # Ensure baseline is truly clean - not near any event
-            if label == 0:  # baseline candidate
-                if len(self.all_confusion_events) > 0:
-                    all_times = np.array([t for t, _ in self.all_confusion_events])
-                    if np.min(np.abs(all_times - window_center_time)) < safety_margin:
-                        continue  # Skip this window - too close to an event
-            
-            # Extract features
-            features = self.extract_features(window)
-            X.append(features)
-            y.append(label)
-            timestamps_list.append(window_center_time)
+            print(f"  Baseline words processed: {baseline_count}")
         
         X = np.array(X)
         y = np.array(y)
-        timestamps_array = np.array(timestamps_list)
-        
-        # Downsample baseline class to reduce imbalance
-        if downsample_baseline_ratio is not None:
-            baseline_idx = np.where(y == 0)[0]
-            positive_idx = np.where(y > 0)[0]
-            
-            if len(baseline_idx) > 0 and len(positive_idx) > 0:
-                max_baseline = len(positive_idx) * downsample_baseline_ratio
-                
-                if len(baseline_idx) > max_baseline:
-                    print(f"\nDownsampling baseline: {len(baseline_idx)} -> {int(max_baseline)}")
-                    # Random sample of baseline indices
-                    np.random.seed(42)  # For reproducibility
-                    keep_baseline = np.random.choice(baseline_idx, int(max_baseline), replace=False)
-                    keep_idx = np.sort(np.concatenate([keep_baseline, positive_idx]))
-                    
-                    X = X[keep_idx]
-                    y = y[keep_idx]
-                    timestamps_array = timestamps_array[keep_idx]
         
         # Print class distribution
         unique, counts = np.unique(y, return_counts=True)
@@ -261,25 +410,18 @@ class ConfusionMLDetector:
             class_name = ['Baseline', 'Word Confusion', 'Sentence Confusion'][cls]
             print(f"  {class_name}: {count} samples ({count/len(y)*100:.1f}%)")
         
-        return X, y, timestamps_array
+        return X, y, words, timestamps_list
     
-    def train_classifier(self, X, y, model_type='xgboost'):
-        """Train and evaluate classifier"""
+    def train_word_model(self, X, y, words):
+        """Train model to predict word-level confusion"""
         print(f"\n{'='*40}")
-        print("TRAINING CLASSIFIER")
+        print("TRAINING WORD-LEVEL MODEL")
         print(f"{'='*40}")
         
-        # Create binary labels for overall confusion detection
-        y_binary = (y > 0).astype(int)  # 0=baseline, 1=any confusion
-        
-        # Temporal split (use last 30% of data as test)
-        split_idx = int(len(X) * 0.7)
-        X_train = X[:split_idx]
-        X_test = X[split_idx:]
-        y_train = y[:split_idx]
-        y_test = y[split_idx:]
-        y_train_binary = y_binary[:split_idx]
-        y_test_binary = y_binary[split_idx:]
+        # Split data
+        X_train, X_test, y_train, y_test, words_train, words_test = train_test_split(
+            X, y, words, test_size=0.3, random_state=42, stratify=y
+        )
         
         print(f"\nTrain/Test split:")
         print(f"  Training: {len(X_train)} samples")
@@ -290,358 +432,423 @@ class ConfusionMLDetector:
         X_train_scaled = scaler.fit_transform(X_train)
         X_test_scaled = scaler.transform(X_test)
         
-        # Train binary classifier (confusion vs baseline)
-        print(f"\n1. Binary Classification (Confusion vs Baseline)")
-        print("-" * 40)
+        # Train classifier
+        print(f"\nTraining XGBoost classifier...")
         
-        # Class imbalance handling
-        pos = (y_train_binary == 1).sum()
-        neg = (y_train_binary == 0).sum()
-        pos_weight = neg / max(1, pos)
-        print(f"Class balance: {neg} baseline, {pos} confusion (weight={pos_weight:.2f})")
+        # Calculate class weights
+        classes, counts = np.unique(y_train, return_counts=True)
+        total = len(y_train)
+        class_weights = {c: total / (len(classes) * count) for c, count in zip(classes, counts)}
+        sample_weights = np.array([class_weights[y] for y in y_train])
         
-        if model_type == 'xgboost':
-            clf_binary = xgb.XGBClassifier(
-                n_estimators=100,
-                max_depth=4,
-                learning_rate=0.1,
-                random_state=42,
-                use_label_encoder=False,
-                eval_metric='logloss',
-                scale_pos_weight=pos_weight  # Handle class imbalance
-            )
-        else:
-            clf_binary = RandomForestClassifier(
-                n_estimators=100,
-                max_depth=5,
-                random_state=42,
-                class_weight='balanced'  # Handle class imbalance
-            )
+        clf = xgb.XGBClassifier(
+            n_estimators=200,
+            max_depth=6,
+            learning_rate=0.1,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            random_state=42,
+            use_label_encoder=False,
+            eval_metric='mlogloss',
+            objective='multi:softprob',
+            num_class=3
+        )
         
-        clf_binary.fit(X_train_scaled, y_train_binary)
+        clf.fit(X_train_scaled, y_train, sample_weight=sample_weights)
         
-        # Get prediction probabilities
-        y_pred_proba = clf_binary.predict_proba(X_test_scaled)[:, 1]
+        # Predictions
+        y_pred = clf.predict(X_test_scaled)
+        y_pred_proba = clf.predict_proba(X_test_scaled)
         
-        # Threshold tuning for best F1
-        from sklearn.metrics import precision_recall_curve
-        prec, rec, thr = precision_recall_curve(y_test_binary, y_pred_proba)
-        f1 = 2 * prec[:-1] * rec[:-1] / (prec[:-1] + rec[:-1] + 1e-9)
-        best_thr = thr[f1.argmax()]
-        y_pred_binary = (y_pred_proba >= best_thr).astype(int)
-        print(f"Optimal threshold (max F1): {best_thr:.3f}")
+        print("\nClassification Report:")
+        print(classification_report(y_test, y_pred,
+                                   target_names=['Baseline', 'Word Conf', 'Sent Conf']))
         
-        # Evaluation
-        print("\nBinary Classification Results:")
-        print(classification_report(y_test_binary, y_pred_binary, 
-                                   target_names=['Baseline', 'Confusion']))
+        # Analyze word-level performance
+        print("\nWord-Level Analysis:")
         
-        # Cross-validation on training set
-        cv_scores = cross_val_score(clf_binary, X_train_scaled, y_train_binary, cv=5)
-        print(f"\nCross-validation accuracy: {cv_scores.mean():.3f} (+/- {cv_scores.std()*2:.3f})")
+        # Group predictions by word
+        word_performance = defaultdict(lambda: {'correct': 0, 'total': 0, 'confused_prob': []})
         
-        # Train multi-class classifier (baseline vs word vs sentence)
-        print(f"\n2. Multi-class Classification")
-        print("-" * 40)
+        for word, true_label, pred_label, prob in zip(words_test, y_test, y_pred, y_pred_proba):
+            word_performance[word]['total'] += 1
+            if true_label == pred_label:
+                word_performance[word]['correct'] += 1
+            # Store probability of confusion (sum of word and sentence confusion)
+            word_performance[word]['confused_prob'].append(prob[1] + prob[2])
         
-        # Sample weights for multiclass
-        from sklearn.utils import compute_class_weight
-        classes = np.unique(y_train)
-        cw = compute_class_weight('balanced', classes=classes, y=y_train)
-        class_weight_map = dict(zip(classes, cw))
-        sample_weight_multi = np.array([class_weight_map[c] for c in y_train])
-        print(f"Class weights: {class_weight_map}")
+        # Find most accurately detected confused words
+        confused_words_test = [(w, p) for w, p in word_performance.items() 
+                              if any(y == 1 or y == 2 for y, w2 in zip(y_test, words_test) if w2 == w)]
         
-        if model_type == 'xgboost':
-            clf_multi = xgb.XGBClassifier(
-                n_estimators=100,
-                max_depth=4,
-                learning_rate=0.1,
-                random_state=42,
-                use_label_encoder=False,
-                eval_metric='mlogloss',
-                objective='multi:softprob',
-                num_class=3
-            )
-            clf_multi.fit(X_train_scaled, y_train, sample_weight=sample_weight_multi)
-        else:
-            clf_multi = RandomForestClassifier(
-                n_estimators=100,
-                max_depth=5,
-                random_state=42,
-                class_weight='balanced'
-            )
-            clf_multi.fit(X_train_scaled, y_train)
-        
-        y_pred_multi = clf_multi.predict(X_test_scaled)
-        
-        print("\nMulti-class Classification Results:")
-        print(classification_report(y_test, y_pred_multi,
-                                   target_names=['Baseline', 'Word', 'Sentence']))
+        if confused_words_test:
+            print("\nTop detected confused words:")
+            sorted_words = sorted(confused_words_test, 
+                                key=lambda x: np.mean(word_performance[x[0]]['confused_prob']), 
+                                reverse=True)[:10]
+            
+            for word, _ in sorted_words:
+                perf = word_performance[word]
+                avg_prob = np.mean(perf['confused_prob'])
+                accuracy = perf['correct'] / perf['total']
+                print(f"  '{word}': prob={avg_prob:.3f}, accuracy={accuracy:.3f}")
         
         # Feature importance
-        if hasattr(clf_binary, 'feature_importances_'):
-            importances = clf_binary.feature_importances_
-        else:
-            importances = clf_binary.feature_importances_
-        
-        # Get feature names
         feature_names = self._get_feature_names()
+        importances = clf.feature_importances_
         
-        # Sort features by importance
+        # Top features
         indices = np.argsort(importances)[::-1][:20]
         
         print(f"\nTop 20 Most Important Features:")
         for i, idx in enumerate(indices):
             print(f"  {i+1:2d}. {feature_names[idx]}: {importances[idx]:.4f}")
         
+        # Analyze feature groups
+        eeg_importance = np.mean([imp for feat, imp in zip(feature_names, importances) if 'EEG' in feat])
+        fnirs_importance = np.mean([imp for feat, imp in zip(feature_names, importances) if 'fNIRS' in feat])
+        word_importance = np.mean([imp for feat, imp in zip(feature_names, importances) if 'Word' in feat])
+        
+        print(f"\nFeature Group Importance:")
+        print(f"  EEG features: {eeg_importance:.4f}")
+        if self.fnirs is not None:
+            print(f"  fNIRS features: {fnirs_importance:.4f}")
+        print(f"  Word features: {word_importance:.4f}")
+        
         return {
-            'binary_classifier': clf_binary,
-            'multi_classifier': clf_multi,
+            'classifier': clf,
             'scaler': scaler,
             'X_test': X_test_scaled,
             'y_test': y_test,
-            'y_test_binary': y_test_binary,
-            'y_pred_binary': y_pred_binary,
-            'y_pred_multi': y_pred_multi,
+            'y_pred': y_pred,
             'y_pred_proba': y_pred_proba,
+            'words_test': words_test,
             'feature_importances': importances,
-            'feature_names': feature_names
+            'feature_names': feature_names,
+            'word_performance': word_performance
         }
     
     def _get_feature_names(self):
         """Generate feature names"""
         names = []
         
-        # Per-channel features
+        # EEG features per channel
         for ch in self.channels:
             names.extend([
-                f'{ch}_mean', f'{ch}_std', f'{ch}_max_abs',
-                f'{ch}_skew', f'{ch}_kurtosis', f'{ch}_zero_cross',
-                f'{ch}_delta', f'{ch}_theta', f'{ch}_alpha',
-                f'{ch}_beta', f'{ch}_gamma', f'{ch}_peak_freq',
-                f'{ch}_spectral_entropy'
+                f'EEG_{ch}_mean', f'EEG_{ch}_std', f'EEG_{ch}_max_abs',
+                f'EEG_{ch}_skew', f'EEG_{ch}_kurtosis',
+                f'EEG_{ch}_delta', f'EEG_{ch}_theta', f'EEG_{ch}_alpha',
+                f'EEG_{ch}_beta', f'EEG_{ch}_gamma',
+                f'EEG_{ch}_peak_freq', f'EEG_{ch}_spectral_entropy'
             ])
         
-        # Inter-channel features
+        # fNIRS features
+        if self.fnirs is not None:
+            for i in range(4):
+                names.extend([
+                    f'fNIRS_Ch{i+1}_mean', f'fNIRS_Ch{i+1}_std', 
+                    f'fNIRS_Ch{i+1}_range', f'fNIRS_Ch{i+1}_slope',
+                    f'fNIRS_Ch{i+1}_time_to_peak'
+                ])
+        
+        # Connectivity features
         names.extend([
-            'frontal_asymmetry', 'temporal_asymmetry',
-            'corr_TP9_AF7', 'corr_TP9_AF8', 'corr_TP9_TP10',
-            'corr_AF7_AF8', 'corr_AF7_TP10', 'corr_AF8_TP10'
+            'Frontal_asymmetry_alpha',
+            'Phase_sync_TP9_AF7', 'Phase_sync_TP9_AF8', 'Phase_sync_TP9_TP10',
+            'Phase_sync_AF7_AF8', 'Phase_sync_AF7_TP10', 'Phase_sync_AF8_TP10'
+        ])
+        
+        # Word features
+        names.extend([
+            'Word_length', 'Word_syllables', 'Word_has_number',
+            'Word_previously_confused', 'Word_confusion_count'
         ])
         
         return names
     
     def plot_results(self, results):
-        """Generate comprehensive result visualizations"""
+        """Visualize word-level detection results"""
         print(f"\n{'='*40}")
         print("GENERATING VISUALIZATIONS")
         print(f"{'='*40}")
         
-        fig = plt.figure(figsize=(18, 12))
-        fig.suptitle('ML Confusion Detection Results', fontsize=16, fontweight='bold')
+        fig = plt.figure(figsize=(20, 14))
+        fig.suptitle('Word-Level Confusion Detection Results', fontsize=16, fontweight='bold')
         
-        # 1. Confusion Matrix - Binary
-        ax1 = plt.subplot(3, 3, 1)
-        cm_binary = confusion_matrix(results['y_test_binary'], results['y_pred_binary'])
-        im1 = ax1.imshow(cm_binary, interpolation='nearest', cmap='Blues')
-        ax1.set_xticks([0, 1])
-        ax1.set_yticks([0, 1])
-        ax1.set_xticklabels(['Baseline', 'Confusion'])
-        ax1.set_yticklabels(['Baseline', 'Confusion'])
+        # 1. Confusion Matrix
+        ax1 = plt.subplot(3, 4, 1)
+        cm = confusion_matrix(results['y_test'], results['y_pred'])
+        im1 = ax1.imshow(cm, interpolation='nearest', cmap='Blues')
+        ax1.set_xticks([0, 1, 2])
+        ax1.set_yticks([0, 1, 2])
+        ax1.set_xticklabels(['Base', 'Word', 'Sent'], rotation=45)
+        ax1.set_yticklabels(['Base', 'Word', 'Sent'])
         ax1.set_xlabel('Predicted')
         ax1.set_ylabel('True')
-        ax1.set_title('Binary Classification\nConfusion Matrix')
-        
-        # Add text annotations
-        for i in range(2):
-            for j in range(2):
-                ax1.text(j, i, str(cm_binary[i, j]),
-                        ha="center", va="center", color="white" if cm_binary[i, j] > cm_binary.max()/2 else "black")
-        
-        plt.colorbar(im1, ax=ax1)
-        
-        # 2. Confusion Matrix - Multi-class
-        ax2 = plt.subplot(3, 3, 2)
-        cm_multi = confusion_matrix(results['y_test'], results['y_pred_multi'])
-        im2 = ax2.imshow(cm_multi, interpolation='nearest', cmap='Blues')
-        ax2.set_xticks([0, 1, 2])
-        ax2.set_yticks([0, 1, 2])
-        ax2.set_xticklabels(['Base', 'Word', 'Sent'], rotation=45)
-        ax2.set_yticklabels(['Base', 'Word', 'Sent'])
-        ax2.set_xlabel('Predicted')
-        ax2.set_ylabel('True')
-        ax2.set_title('Multi-class Classification\nConfusion Matrix')
+        ax1.set_title('Confusion Matrix')
         
         # Add text annotations
         for i in range(3):
             for j in range(3):
-                ax2.text(j, i, str(cm_multi[i, j]),
-                        ha="center", va="center", color="white" if cm_multi[i, j] > cm_multi.max()/2 else "black")
+                ax1.text(j, i, str(cm[i, j]),
+                        ha="center", va="center", 
+                        color="white" if cm[i, j] > cm.max()/2 else "black")
         
-        plt.colorbar(im2, ax=ax2)
+        plt.colorbar(im1, ax=ax1)
         
-        # 3. ROC Curve
-        ax3 = plt.subplot(3, 3, 3)
-        fpr, tpr, _ = roc_curve(results['y_test_binary'], results['y_pred_proba'])
+        # 2. ROC Curves (One-vs-Rest)
+        ax2 = plt.subplot(3, 4, 2)
+        
+        # Binary classification: any confusion vs baseline
+        y_binary_true = (results['y_test'] > 0).astype(int)
+        y_binary_pred_proba = results['y_pred_proba'][:, 1] + results['y_pred_proba'][:, 2]
+        
+        fpr, tpr, _ = roc_curve(y_binary_true, y_binary_pred_proba)
         roc_auc = auc(fpr, tpr)
         
-        # Also compute PR curve and average precision
-        from sklearn.metrics import precision_recall_curve, average_precision_score
-        precision, recall, _ = precision_recall_curve(results['y_test_binary'], results['y_pred_proba'])
-        avg_precision = average_precision_score(results['y_test_binary'], results['y_pred_proba'])
+        ax2.plot(fpr, tpr, lw=2, label=f'Any Confusion (AUC = {roc_auc:.2f})')
+        ax2.plot([0, 1], [0, 1], 'k--', lw=1)
+        ax2.set_xlabel('False Positive Rate')
+        ax2.set_ylabel('True Positive Rate')
+        ax2.set_title('ROC Curve')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
         
-        # Plot both curves
-        ax3.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC (AUC = {roc_auc:.2f})')
-        ax3.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--', label='Random')
-        ax3.set_xlim([0.0, 1.0])
-        ax3.set_ylim([0.0, 1.05])
-        ax3.set_xlabel('False Positive Rate')
-        ax3.set_ylabel('True Positive Rate')
-        ax3.set_title('ROC Curve - Binary Classification')
-        ax3.legend(loc="lower right")
-        ax3.grid(True, alpha=0.3)
+        # 3. Precision-Recall by Word Length
+        ax3 = plt.subplot(3, 4, 3)
         
-        # 4. Precision-Recall Curve (better for imbalanced data)
-        ax4 = plt.subplot(3, 3, 4)
-        ax4.plot(recall, precision, color='green', lw=2, label=f'PR (AP = {avg_precision:.2f})')
-        ax4.set_xlabel('Recall')
-        ax4.set_ylabel('Precision')
-        ax4.set_title('Precision-Recall Curve\n(Better for Imbalanced Data)')
-        ax4.set_xlim([0.0, 1.0])
-        ax4.set_ylim([0.0, 1.05])
-        ax4.legend(loc="lower left")
-        ax4.grid(True, alpha=0.3)
+        # Group by word length
+        word_lengths = [len(w) for w in results['words_test']]
+        length_groups = defaultdict(lambda: {'y_true': [], 'y_pred': []})
         
-        # Add baseline rate line
-        baseline_rate = np.sum(results['y_test_binary']) / len(results['y_test_binary'])
-        ax4.axhline(y=baseline_rate, color='red', linestyle='--', label=f'Baseline ({baseline_rate:.2f})')
+        for length, y_true, y_pred in zip(word_lengths, results['y_test'], results['y_pred']):
+            length_bin = min(length // 3, 4)  # Group in bins of 3 letters
+            length_groups[length_bin]['y_true'].append(y_true > 0)  # Binary
+            length_groups[length_bin]['y_pred'].append(y_pred > 0)
         
-        # 5. Feature Importance (Top 15)
-        ax5 = plt.subplot(3, 3, (5, 6))
-        top_n = 15
+        lengths = sorted(length_groups.keys())
+        precisions = []
+        recalls = []
+        
+        for length in lengths:
+            group = length_groups[length]
+            if len(group['y_true']) > 0:
+                from sklearn.metrics import precision_score, recall_score
+                prec = precision_score(group['y_true'], group['y_pred'], zero_division=0)
+                rec = recall_score(group['y_true'], group['y_pred'], zero_division=0)
+                precisions.append(prec)
+                recalls.append(rec)
+        
+        x = np.arange(len(lengths))
+        width = 0.35
+        
+        ax3.bar(x - width/2, precisions, width, label='Precision', alpha=0.8)
+        ax3.bar(x + width/2, recalls, width, label='Recall', alpha=0.8)
+        ax3.set_xlabel('Word Length Group')
+        ax3.set_ylabel('Score')
+        ax3.set_title('Performance by Word Length')
+        ax3.set_xticks(x)
+        ax3.set_xticklabels([f'{l*3}-{l*3+2}' for l in lengths])
+        ax3.legend()
+        ax3.grid(True, alpha=0.3, axis='y')
+        
+        # 4. Feature Importance by Category
+        ax4 = plt.subplot(3, 4, 4)
+        
+        # Group features by category
+        feature_categories = defaultdict(list)
+        for i, name in enumerate(results['feature_names']):
+            if 'EEG' in name:
+                if any(band in name for band in ['delta', 'theta', 'alpha', 'beta', 'gamma']):
+                    feature_categories['EEG Frequency'].append(results['feature_importances'][i])
+                else:
+                    feature_categories['EEG Time'].append(results['feature_importances'][i])
+            elif 'fNIRS' in name:
+                feature_categories['fNIRS'].append(results['feature_importances'][i])
+            elif 'Phase_sync' in name or 'asymmetry' in name:
+                feature_categories['Connectivity'].append(results['feature_importances'][i])
+            elif 'Word' in name:
+                feature_categories['Word Features'].append(results['feature_importances'][i])
+        
+        categories = list(feature_categories.keys())
+        avg_importances = [np.mean(feature_categories[cat]) for cat in categories]
+        
+        ax4.barh(categories, avg_importances, color='steelblue')
+        ax4.set_xlabel('Average Importance')
+        ax4.set_title('Feature Importance by Category')
+        ax4.grid(True, alpha=0.3, axis='x')
+        
+        # 5. Confusion Probability Distribution
+        ax5 = plt.subplot(3, 4, 5)
+        
+        # Get confusion probabilities for all samples
+        confusion_probs = results['y_pred_proba'][:, 1] + results['y_pred_proba'][:, 2]
+        
+        # Separate by true class
+        baseline_probs = confusion_probs[results['y_test'] == 0]
+        confused_probs = confusion_probs[results['y_test'] > 0]
+        
+        ax5.hist(baseline_probs, bins=30, alpha=0.5, label='True Baseline', color='green', density=True)
+        ax5.hist(confused_probs, bins=30, alpha=0.5, label='True Confused', color='red', density=True)
+        ax5.set_xlabel('Predicted Confusion Probability')
+        ax5.set_ylabel('Density')
+        ax5.set_title('Confusion Probability Distribution')
+        ax5.legend()
+        ax5.grid(True, alpha=0.3)
+        
+        # 6. Top Features
+        ax6 = plt.subplot(3, 4, (6, 7))
+        
+        top_n = 20
         indices = np.argsort(results['feature_importances'])[::-1][:top_n]
         
-        ax5.barh(range(top_n), results['feature_importances'][indices][::-1], color='steelblue')
-        ax5.set_yticks(range(top_n))
-        ax5.set_yticklabels([results['feature_names'][i] for i in indices[::-1]], fontsize=8)
-        ax5.set_xlabel('Importance')
-        ax5.set_title('Top 15 Feature Importances')
-        ax5.grid(True, alpha=0.3, axis='x')
+        ax6.barh(range(top_n), results['feature_importances'][indices][::-1], color='steelblue')
+        ax6.set_yticks(range(top_n))
+        ax6.set_yticklabels([results['feature_names'][i] for i in indices[::-1]], fontsize=8)
+        ax6.set_xlabel('Importance')
+        ax6.set_title('Top 20 Features')
+        ax6.grid(True, alpha=0.3, axis='x')
         
-        # 6. PCA Visualization
-        ax6 = plt.subplot(3, 3, 7)
-        pca = PCA(n_components=2)
-        X_pca = pca.fit_transform(results['X_test'])
+        # 7. EEG Band Power Analysis
+        ax7 = plt.subplot(3, 4, 8)
         
-        colors = ['green', 'orange', 'red']
-        labels = ['Baseline', 'Word', 'Sentence']
+        # Extract band power importance
+        bands = ['delta', 'theta', 'alpha', 'beta', 'gamma']
+        band_importance = {}
         
-        for i in range(3):
-            mask = results['y_test'] == i
-            if np.any(mask):
-                ax6.scatter(X_pca[mask, 0], X_pca[mask, 1], 
-                          c=colors[i], label=labels[i], alpha=0.6, s=20)
+        for band in bands:
+            band_indices = [i for i, name in enumerate(results['feature_names']) 
+                          if band in name.lower()]
+            if band_indices:
+                band_importance[band] = np.mean(results['feature_importances'][band_indices])
         
-        ax6.set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.1%} var)')
-        ax6.set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.1%} var)')
-        ax6.set_title('PCA Projection of Test Data')
-        ax6.legend()
-        ax6.grid(True, alpha=0.3)
+        if band_importance:
+            bands_list = list(band_importance.keys())
+            importances = list(band_importance.values())
+            
+            ax7.bar(bands_list, importances, color=['purple', 'blue', 'green', 'orange', 'red'])
+            ax7.set_xlabel('Frequency Band')
+            ax7.set_ylabel('Average Importance')
+            ax7.set_title('EEG Band Importance')
+            ax7.grid(True, alpha=0.3, axis='y')
         
-        # 7. Prediction Confidence Distribution
-        ax7 = plt.subplot(3, 3, 8)
+        # 8. Word Cloud of Confused Words (simulated with bar chart)
+        ax8 = plt.subplot(3, 4, (9, 10))
         
-        # Get prediction probabilities for confusion class
-        confusion_proba = results['y_pred_proba']
+        # Count confused words in test set
+        confused_word_counts = defaultdict(int)
+        for word, y_true in zip(results['words_test'], results['y_test']):
+            if y_true > 0:  # Confused
+                confused_word_counts[word] += 1
         
-        # Separate by true label
-        baseline_proba = confusion_proba[results['y_test_binary'] == 0]
-        confusion_proba_true = confusion_proba[results['y_test_binary'] == 1]
+        if confused_word_counts:
+            # Top confused words
+            top_words = sorted(confused_word_counts.items(), key=lambda x: x[1], reverse=True)[:15]
+            words, counts = zip(*top_words)
+            
+            y_pos = np.arange(len(words))
+            ax8.barh(y_pos, counts, color='crimson')
+            ax8.set_yticks(y_pos)
+            ax8.set_yticklabels(words, fontsize=10)
+            ax8.set_xlabel('Frequency')
+            ax8.set_title('Most Frequently Confused Words')
+            ax8.grid(True, alpha=0.3, axis='x')
         
-        ax7.hist(baseline_proba, bins=20, alpha=0.5, label='True Baseline', color='green')
-        ax7.hist(confusion_proba_true, bins=20, alpha=0.5, label='True Confusion', color='red')
-        ax7.axvline(x=0.5, color='black', linestyle='--', label='Default Threshold')
-        ax7.set_xlabel('Predicted Confusion Probability')
-        ax7.set_ylabel('Count')
-        ax7.set_title('Prediction Confidence Distribution')
-        ax7.legend()
-        ax7.grid(True, alpha=0.3)
+        # 9. Temporal Analysis (if fNIRS available)
+        if self.fnirs is not None:
+            ax9 = plt.subplot(3, 4, 11)
+            
+            # Get fNIRS-related feature importance
+            fnirs_indices = [i for i, name in enumerate(results['feature_names']) 
+                           if 'fNIRS' in name]
+            
+            if fnirs_indices:
+                fnirs_features = defaultdict(list)
+                for idx in fnirs_indices:
+                    feature_name = results['feature_names'][idx]
+                    if 'mean' in feature_name:
+                        fnirs_features['Mean'].append(results['feature_importances'][idx])
+                    elif 'slope' in feature_name:
+                        fnirs_features['Slope'].append(results['feature_importances'][idx])
+                    elif 'time_to_peak' in feature_name:
+                        fnirs_features['Time to Peak'].append(results['feature_importances'][idx])
+                
+                feature_types = list(fnirs_features.keys())
+                avg_imp = [np.mean(fnirs_features[ft]) for ft in feature_types]
+                
+                ax9.bar(feature_types, avg_imp, color='coral')
+                ax9.set_ylabel('Average Importance')
+                ax9.set_title('fNIRS Feature Type Importance')
+                ax9.grid(True, alpha=0.3, axis='y')
         
-        # 8. Channel Contribution Analysis
-        ax8 = plt.subplot(3, 3, 9)
+        # 10. Performance Summary Text
+        ax10 = plt.subplot(3, 4, 12)
+        ax10.axis('off')
         
-        # Calculate average importance per channel
-        channel_importance = {}
-        for ch in self.channels:
-            ch_features = [i for i, name in enumerate(results['feature_names']) if name.startswith(ch)]
-            channel_importance[ch] = np.mean(results['feature_importances'][ch_features])
+        # Calculate metrics
+        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
         
-        channels = list(channel_importance.keys())
-        importances = list(channel_importance.values())
+        # Binary metrics (any confusion vs baseline)
+        y_binary_true = (results['y_test'] > 0).astype(int)
+        y_binary_pred = (results['y_pred'] > 0).astype(int)
         
-        ax8.bar(channels, importances, color=['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4'])
-        ax8.set_xlabel('Channel')
-        ax8.set_ylabel('Average Feature Importance')
-        ax8.set_title('Channel Contribution to Detection')
-        ax8.grid(True, alpha=0.3, axis='y')
+        accuracy = accuracy_score(results['y_test'], results['y_pred'])
+        binary_precision = precision_score(y_binary_true, y_binary_pred)
+        binary_recall = recall_score(y_binary_true, y_binary_pred)
+        binary_f1 = f1_score(y_binary_true, y_binary_pred)
+        
+        summary_text = f"""Performance Summary:
+        
+Overall Accuracy: {accuracy:.3f}
+
+Binary Classification (Confusion Detection):
+  Precision: {binary_precision:.3f}
+  Recall: {binary_recall:.3f}
+  F1-Score: {binary_f1:.3f}
+  ROC AUC: {roc_auc:.3f}
+
+Word Analysis:
+  Total test words: {len(results['words_test'])}
+  Unique test words: {len(set(results['words_test']))}
+  Confused words detected: {sum(y_binary_pred)}
+
+Key Insights:
+  • {categories[np.argmax(avg_importances)]} features are most important
+  • Best performing frequency band: {bands_list[np.argmax(importances)] if band_importance else 'N/A'}
+  • Model can identify specific confusing words"""
+        
+        ax10.text(0.1, 0.5, summary_text, transform=ax10.transAxes,
+                 fontsize=10, verticalalignment='center', fontfamily='monospace')
         
         plt.tight_layout()
         plt.show()
         
-        # Print performance summary
-        print("\n" + "="*50)
-        print("PERFORMANCE SUMMARY")
-        print("="*50)
+        return fig
+    
+    def predict_confusion_realtime(self, new_text, model_results):
+        """Simulate real-time confusion prediction on new text"""
+        print(f"\n{'='*40}")
+        print("REAL-TIME CONFUSION PREDICTION DEMO")
+        print(f"{'='*40}")
         
-        # Calculate metrics
-        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, average_precision_score
+        # This is a simulation - in real deployment, you would:
+        # 1. Stream EEG/fNIRS data while reading
+        # 2. Track cursor position to know current word
+        # 3. Extract features for each word in real-time
+        # 4. Apply the trained model
         
-        binary_acc = accuracy_score(results['y_test_binary'], results['y_pred_binary'])
-        binary_prec = precision_score(results['y_test_binary'], results['y_pred_binary'])
-        binary_rec = recall_score(results['y_test_binary'], results['y_pred_binary'])
-        binary_f1 = f1_score(results['y_test_binary'], results['y_pred_binary'])
-        avg_precision = average_precision_score(results['y_test_binary'], results['y_pred_proba'])
+        print("\nThis would predict confusion for each word as you read.")
+        print("The model would highlight potentially confusing words based on:")
+        print("  • Your EEG patterns while reading each word")
+        print("  • fNIRS hemodynamic response")
+        print("  • Word characteristics")
+        print("  • Your personal confusion history")
         
-        print(f"\nBinary Classification (Confusion Detection):")
-        print(f"  Accuracy:  {binary_acc:.3f}")
-        print(f"  Precision: {binary_prec:.3f}")
-        print(f"  Recall:    {binary_rec:.3f}")
-        print(f"  F1-Score:  {binary_f1:.3f}")
-        print(f"  ROC AUC:   {roc_auc:.3f}")
-        print(f"  Average Precision: {avg_precision:.3f} (more reliable for imbalanced data)")
-        
-        multi_acc = accuracy_score(results['y_test'], results['y_pred_multi'])
-        
-        print(f"\nMulti-class Classification:")
-        print(f"  Accuracy:  {multi_acc:.3f}")
-        
-        # Analyze errors
-        false_positives = np.sum((results['y_test_binary'] == 0) & (results['y_pred_binary'] == 1))
-        false_negatives = np.sum((results['y_test_binary'] == 1) & (results['y_pred_binary'] == 0))
-        
-        print(f"\nError Analysis:")
-        print(f"  False Positives: {false_positives} (baseline predicted as confusion)")
-        print(f"  False Negatives: {false_negatives} (confusion missed)")
-        
-        # Feature insights
-        print(f"\nKey Insights:")
-        top_features = [results['feature_names'][i] for i in np.argsort(results['feature_importances'])[::-1][:5]]
-        print(f"  Most predictive features: {', '.join(top_features)}")
-        
-        # Channel analysis
-        best_channel = max(channel_importance.items(), key=lambda x: x[1])
-        print(f"  Most informative channel: {best_channel[0]}")
-        
-        # Frequency analysis - compute from feature names
-        bands = ['delta', 'theta', 'alpha', 'beta', 'gamma']
-        band_importance = {}
-        for band in bands:
-            band_features = [i for i, name in enumerate(results['feature_names']) if band in name]
-            band_importance[band] = np.mean(results['feature_importances'][band_features]) if band_features else 0
-        
-        best_band = max(band_importance.items(), key=lambda x: x[1])
-        print(f"  Most relevant frequency band: {best_band[0]}")
+        # Example: Show which features are most predictive
+        top_features = np.argsort(model_results['feature_importances'])[::-1][:10]
+        print("\nMost predictive features for your confusion:")
+        for i, idx in enumerate(top_features):
+            print(f"  {i+1}. {model_results['feature_names'][idx]}")
 
 def main():
     """Main function"""
@@ -653,11 +860,11 @@ def main():
     if len(sys.argv) > 1:
         filepath = sys.argv[1]
     else:
-        # Look for NPZ files
+        # Look for NPZ files with click data
         search_paths = [
-            "*.npz",
-            "~/Downloads/*.npz",
-            os.path.expanduser("~/Downloads/*.npz")
+            "*confusion_clicks*.npz",
+            "~/Downloads/*confusion_clicks*.npz",
+            os.path.expanduser("~/Downloads/*confusion_clicks*.npz")
         ]
         
         npz_files = []
@@ -665,7 +872,8 @@ def main():
             npz_files.extend(glob.glob(path))
         
         if not npz_files:
-            print("No NPZ files found. Please specify a file path.")
+            print("No confusion click NPZ files found. Please specify a file path.")
+            print("Looking for files with 'confusion_clicks' in the name.")
             return
         
         print("Available NPZ files:")
@@ -684,41 +892,43 @@ def main():
                 print("Invalid selection")
                 return
     
-    # Run ML analysis
-    detector = ConfusionMLDetector(filepath)
+    # Create detector
+    detector = WordConfusionDetector(filepath)
     
-    # Create dataset with sliding windows
-    # CRITICAL CHANGE: Windows now capture confusion BEFORE the keypress
-    X, y, timestamps = detector.create_dataset(
-        window_size=1.0,          # 1 second windows
-        stride=0.1,               # 100ms stride for overlap
-        pre_event=2.0,            # Look 2s before the keypress
-        post_event=-0.3,          # End window 0.3s before keypress (avoids motor prep)
-        safety_margin=1.0,        # Keep baseline 1s away from any event
-        downsample_baseline_ratio=3  # Limit baseline to 3x positive samples
+    # Create word-level dataset
+    X, y, words, timestamps = detector.create_word_dataset(
+        window_size=2.0,  # 2 second windows around each word
+        include_baseline_words=True
     )
     
-    # Train and evaluate
-    results = detector.train_classifier(X, y, model_type='xgboost')
+    if len(X) == 0:
+        print("\nNo data extracted. Ensure the recording has clicked confusion events.")
+        return
+    
+    # Train model
+    results = detector.train_word_model(X, y, words)
     
     # Visualize results
     detector.plot_results(results)
     
+    # Demo real-time prediction
+    detector.predict_confusion_realtime("Example new text...", results)
+    
     print("\n" + "="*60)
     print("ANALYSIS COMPLETE")
     print("="*60)
-    print("\nThe model has been trained to detect confusion events.")
-    print("Check the visualizations for detailed performance metrics.")
-    print("\nImproved pipeline:")
-    print("  • Confusion windows now EXCLUDE keypress (avoids motor artifacts)")
-    print("  • Added 60/120 Hz notch filters for powerline noise")
-    print("  • Downsampled baseline for better class balance")
-    print("  • True baseline kept 1s away from any event")
-    print("\nTo improve accuracy further:")
-    print("  • Collect more training data across multiple sessions")
-    print("  • Mark events more precisely when confused")
-    print("  • Consider adding fNIRS features if hemodynamic response is relevant")
-    print("  • Ensure good electrode contact during recording")
+    print("\nThe model can now identify specific words that confuse you!")
+    print("\nKey improvements in this version:")
+    print("  • Analyzes individual WORDS, not just time windows")
+    print("  • Uses clicked words as ground truth labels")
+    print("  • Incorporates fNIRS hemodynamic data")
+    print("  • Tracks word characteristics and confusion history")
+    print("  • Can highlight confusing words in real-time while reading")
+    print("\nNext steps for deployment:")
+    print("  • Stream data in real-time while reading")
+    print("  • Highlight predicted confusing words in the text")
+    print("  • Build personalized confusion profile over time")
+    print("  • Adapt to different types of content (technical vs casual)")
 
 if __name__ == "__main__":
     main()

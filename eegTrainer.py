@@ -76,7 +76,7 @@ class TeleprompterWindow:
     def __init__(self, parent_visualizer):
         self.parent = parent_visualizer
         self.root = tk.Tk()
-        self.root.title("👁 READING MATERIAL - Confusion Detection Training")
+        self.root.title("[READING] MATERIAL - Confusion Detection Training")
         
         # Make window large
         self.root.geometry("1200x800")
@@ -90,6 +90,9 @@ class TeleprompterWindow:
         self.current_word_index = ""
         self.cursor_update_interval = 50  # milliseconds
         self.last_cursor_update = 0
+
+        # Delayed labeling mode
+        self.labeling_mode = False
         
         # Header frame
         header_frame = tk.Frame(self.root, bg='#1a1a1a', height=80)
@@ -98,19 +101,19 @@ class TeleprompterWindow:
         
         # Title label
         title_label = tk.Label(header_frame, 
-                               text="👁 CONFUSION DETECTION TRAINING",
+                               text="[TRAINING] CONFUSION DETECTION TRAINING",
                                font=('Arial', 24, 'bold'),
                                fg='#FFD93D',
                                bg='#1a1a1a')
         title_label.pack(pady=10)
         
         # Instructions label
-        instructions = tk.Label(header_frame,
-                               text="LEFT-CLICK word for word confusion | RIGHT-CLICK word for sentence/idea confusion | Cursor tracks current word",
+        self.instructions = tk.Label(header_frame,
+                               text="Read paragraph, press 'C' to label confusion, then press 'C' again to continue reading",
                                font=('Arial', 14),
                                fg='#4ECDC4',
                                bg='#1a1a1a')
-        instructions.pack()
+        self.instructions.pack()
         
         # Main text frame
         text_frame = tk.Frame(self.root, bg='#0a0a0a')
@@ -151,7 +154,7 @@ class TeleprompterWindow:
         self.text_status.pack(side=tk.LEFT, padx=20, pady=10)
         
         self.recording_status = tk.Label(status_frame,
-                                        text="⏺ NOT RECORDING",
+                                        text="[STOP] NOT RECORDING",
                                         font=('Arial', 16, 'bold'),
                                         fg='#888888',
                                         bg='#1a1a1a')
@@ -174,7 +177,7 @@ class TeleprompterWindow:
         
         # Navigation hints
         nav_label = tk.Label(status_frame,
-                           text="↑/↓: Scroll | ←/→: Change Text | Space: Start/Stop Recording | +/-: Font Size",
+                           text="Up/Down: Scroll | Left/Right: Change Text | Space: Start/Stop Recording | +/-: Font Size | C: Toggle Labeling Mode",
                            font=('Arial', 12),
                            fg='#888888',
                            bg='#1a1a1a')
@@ -187,6 +190,14 @@ class TeleprompterWindow:
                                        fg='#FF6B6B',
                                        bg='#1a1a1a')
         self.last_click_label.pack(side=tk.BOTTOM, padx=20, pady=2)
+
+        # Labeling mode indicator
+        self.mode_indicator = tk.Label(status_frame,
+                                     text="[READING] MODE - Data Recording",
+                                     font=('Arial', 14, 'bold'),
+                                     fg='#96CEB4',
+                                     bg='#1a1a1a')
+        self.mode_indicator.pack(side=tk.BOTTOM, padx=20, pady=2)
         
         # Bind keyboard events
         self.root.bind('<Key>', self.on_key_press)
@@ -210,18 +221,22 @@ class TeleprompterWindow:
         self.track_cursor()
         
     def on_left_click(self, event):
-        """Handle left click - word confusion"""
+        """Handle left click - word confusion (only in labeling mode)"""
         if not self.parent.is_recording:
             messagebox.showinfo("Not Recording", "Start recording first before marking confusion events.")
             return
-            
+
+        if not self.labeling_mode:
+            messagebox.showinfo("Not in Labeling Mode", "Press 'C' to enter labeling mode first, then click on confused words.")
+            return
+
         # Get the word at click position
         try:
             index = self.text_display.index(f"@{event.x},{event.y}")
             word_start = self.text_display.index(f"{index} wordstart")
             word_end = self.text_display.index(f"{index} wordend")
             clicked_word = self.text_display.get(word_start, word_end).strip()
-            
+
             if clicked_word:
                 # Record the event with the specific word
                 self.parent.record_event('word_confusion', clicked_word)
@@ -231,18 +246,22 @@ class TeleprompterWindow:
             print(f"Error getting clicked word: {e}")
     
     def on_right_click(self, event):
-        """Handle right click - sentence/idea confusion"""
+        """Handle right click - sentence/idea confusion (only in labeling mode)"""
         if not self.parent.is_recording:
             messagebox.showinfo("Not Recording", "Start recording first before marking confusion events.")
             return
-            
+
+        if not self.labeling_mode:
+            messagebox.showinfo("Not in Labeling Mode", "Press 'C' to enter labeling mode first, then click on confused words/sentences.")
+            return
+
         # Get the word at click position (as reference point for the confusing sentence)
         try:
             index = self.text_display.index(f"@{event.x},{event.y}")
             word_start = self.text_display.index(f"{index} wordstart")
             word_end = self.text_display.index(f"{index} wordend")
             clicked_word = self.text_display.get(word_start, word_end).strip()
-            
+
             if clicked_word:
                 # Record the event with the specific word as reference
                 self.parent.record_event('sentence_confusion', clicked_word)
@@ -276,9 +295,10 @@ class TeleprompterWindow:
                 self.current_word = word
                 self.current_word_index = word_start
                 self.word_status.config(text=f"Current word: {word}")
-                
-                # Update parent's current word
-                self.parent.current_word = word
+
+                # Update parent's current word (but not during labeling mode)
+                if not self.labeling_mode:
+                    self.parent.current_word = word
                 
         except Exception as e:
             # Ignore errors from invalid positions
@@ -288,7 +308,9 @@ class TeleprompterWindow:
         """Handle mouse leaving the text area"""
         self.current_word = ""
         self.current_word_index = ""
-        self.parent.current_word = ""
+        # Only update parent during reading mode
+        if not self.labeling_mode:
+            self.parent.current_word = ""
         self.word_status.config(text="Current word: -")
     
     def track_cursor(self):
@@ -355,6 +377,8 @@ class TeleprompterWindow:
                 current_size = 28
             new_size = max(current_size - 2, 16)
             self.text_display.config(font=('Georgia', new_size, 'normal'))
+        elif event.char.lower() == 'c':
+            self.toggle_labeling_mode()
         # Legacy keyboard shortcuts (optional - can be removed)
         elif event.char == '1':
             self.parent.record_event('marker_1', self.current_word)
@@ -424,7 +448,7 @@ class TeleprompterWindow:
         if self.parent.is_recording:
             elapsed = time.time() - self.parent.recording_start_time
             self.recording_status.config(
-                text=f"⏺ RECORDING: {elapsed:.1f}s",
+                text=f"[REC] RECORDING: {elapsed:.1f}s",
                 fg='#ff4444'
             )
             
@@ -439,10 +463,39 @@ class TeleprompterWindow:
             )
         else:
             self.recording_status.config(
-                text="⏺ NOT RECORDING",
+                text="[STOP] NOT RECORDING",
                 fg='#888888'
             )
-    
+
+    def toggle_labeling_mode(self):
+        """Toggle between reading mode and labeling mode"""
+        self.labeling_mode = not self.labeling_mode
+
+        if self.labeling_mode:
+            self.mode_indicator.config(
+                text="[LABELING] MODE - Data Collection PAUSED",
+                fg='#FFD93D'
+            )
+            self.instructions.config(
+                text="LEFT-CLICK confused words | RIGHT-CLICK confused sentences | Press 'C' to resume reading",
+                fg='#FFD93D'
+            )
+            # Change background to indicate labeling mode
+            self.text_display.config(bg='#0f0f0a')  # Slight yellow tint
+            print("\n[LABELING] MODE: Data collection paused. Click on confused words/sentences.")
+        else:
+            self.mode_indicator.config(
+                text="[READING] MODE - Data Recording",
+                fg='#96CEB4'
+            )
+            self.instructions.config(
+                text="Read paragraph, press 'C' to label confusion, then press 'C' again to continue reading",
+                fg='#4ECDC4'
+            )
+            # Restore normal background
+            self.text_display.config(bg='#0a0a0a')
+            print("\n[READING] MODE: Data collection resumed. Continue reading.")
+
     def on_close(self):
         """Handle window close"""
         self.active = False
@@ -656,7 +709,11 @@ class MuseAthenaVisualizer:
         args = message['args']
         type_tags = message['type_tags']
         timestamp = time.time()
-        
+
+        # Skip data collection if in labeling mode
+        if self.teleprompter and self.teleprompter.active and self.teleprompter.labeling_mode:
+            return
+
         with self.lock:
             # Parse address: /username/datatype
             parts = address.strip('/').split('/')
@@ -758,14 +815,14 @@ class MuseAthenaVisualizer:
     def next_text(self):
         """Move to the next text passage"""
         self.current_text_index = (self.current_text_index + 1) % len(TRAINING_TEXTS)
-        print(f"\n📖 Switched to text {self.current_text_index + 1}/{len(TRAINING_TEXTS)}")
+        print(f"\n[TEXT] Switched to text {self.current_text_index + 1}/{len(TRAINING_TEXTS)}")
         if self.teleprompter and self.teleprompter.active:
             self.teleprompter.update_display()
     
     def previous_text(self):
         """Move to the previous text passage"""
         self.current_text_index = (self.current_text_index - 1) % len(TRAINING_TEXTS)
-        print(f"\n📖 Switched to text {self.current_text_index + 1}/{len(TRAINING_TEXTS)}")
+        print(f"\n[TEXT] Switched to text {self.current_text_index + 1}/{len(TRAINING_TEXTS)}")
         if self.teleprompter and self.teleprompter.active:
             self.teleprompter.update_display()
     
@@ -867,13 +924,15 @@ class MuseAthenaVisualizer:
             print(f"RECORDING STARTED at {datetime.fromtimestamp(self.recording_start_time).strftime('%Y-%m-%d %H:%M:%S')}")
             print(f"{'='*50}")
             print("\n👁 CURSOR TRACKING ACTIVE - Recording words under cursor")
-            print("\n🖱️ CONFUSION MARKERS:")
-            print("  LEFT-CLICK = Word confusion (click the confusing word)")
-            print("  RIGHT-CLICK = Sentence/idea confusion (click any word in the confusing sentence)")
+            print("\n🖱️ DELAYED CONFUSION LABELING:")
+            print("  1. Read paragraph completely (data recording)")
+            print("  2. Press 'C' to enter labeling mode (data recording pauses)")
+            print("  3. LEFT-CLICK confused words, RIGHT-CLICK confused sentences")
+            print("  4. Press 'C' again to resume reading (data recording resumes)")
             print("  '1', '2', '3' = Other markers (optional)")
             print("\n📖 TEXT NAVIGATION (in teleprompter window):")
-            print("  ↑/↓ = Scroll text")
-            print("  ←/→ = Previous/Next passage")
+            print("  Up/Down = Scroll text")
+            print("  Left/Right = Previous/Next passage")
             print("\nData will be saved as .npz file when recording stops")
         else:
             # Stop recording
@@ -930,11 +989,11 @@ class MuseAthenaVisualizer:
             
             # Special messages for confusion events
             if event_type == 'word_confusion':
-                print(f"🤔 WORD confusion marked at {relative_time:.2f}s on '{clicked_word}'")
+                print(f"[WORD] confusion marked at {relative_time:.2f}s on '{clicked_word}'")
             elif event_type == 'sentence_confusion':
-                print(f"📄 SENTENCE confusion marked at {relative_time:.2f}s near '{clicked_word}'")
+                print(f"[SENT] confusion marked at {relative_time:.2f}s near '{clicked_word}'")
             else:
-                print(f"📌 Event '{event_type}' marked at {relative_time:.2f}s")
+                print(f"[EVENT] '{event_type}' marked at {relative_time:.2f}s")
             
             # Update teleprompter if active
             if self.teleprompter and self.teleprompter.active:
@@ -1618,21 +1677,21 @@ class MuseAthenaVisualizer:
         print("\n" + "="*60)
         print("   MUSE S ATHENA - CONFUSION DETECTION WITH CLICK TRACKING")
         print("="*60)
-        print(f"\n📡 Listening for OSC data on UDP port {self.port}")
-        print("\n👁 WORD TRACKING MODE ACTIVE")
-        print("\n🖱️ CONFUSION MARKERS (use in teleprompter window):")
-        print("  LEFT-CLICK = Click on the word that confuses you")
-        print("  RIGHT-CLICK = Click on any word in a confusing sentence/idea")
+        print(f"\n[RECEIVER] Listening for OSC data on UDP port {self.port}")
+        print("\n[TRACKING] WORD TRACKING MODE ACTIVE")
+        print("\n[LABELING] DELAYED CONFUSION LABELING (use in teleprompter window):")
+        print("  Read -> Press 'C' -> Click confused words/sentences -> Press 'C' -> Continue reading")
+        print("  This separates reading (EEG recording) from labeling (EEG paused)")
         print("  '1','2','3' = Optional keyboard markers")
         
-        print("\n📖 TELEPROMPTER CONTROLS:")
-        print("  ↑/↓ = Scroll text up/down")
-        print("  ←/→ = Previous/Next text passage")
+        print("\n[CONTROLS] TELEPROMPTER CONTROLS:")
+        print("  Up/Down = Scroll text up/down")
+        print("  Left/Right = Previous/Next text passage")
         print("  Space = Start/Stop recording")
         print("  +/- = Increase/decrease font size")
         print("  Cursor tracks which word you're reading")
         
-        print("\n🖥️ VISUALIZER CONTROLS:")
+        print("\n[CONTROLS] VISUALIZER CONTROLS:")
         print("  '+'/'-' = Increase/decrease time window")
         print("  'r' = Reset buffers")
         print("  'q' = Quit (saves data if recording)")
@@ -1641,13 +1700,15 @@ class MuseAthenaVisualizer:
         print("  1. Teleprompter window will open automatically")
         print("  2. Click 'Begin Recording' or press Space to start")
         print("  3. Read the displayed text carefully")
-        print("  4. LEFT-CLICK directly on words that confuse you")
-        print("  5. RIGHT-CLICK on any word in sentences that are confusing")
-        print("  6. Your cursor position tracks which word you're reading")
+        print("  4. Read paragraph completely")
+        print("  5. Press 'C' to pause data collection and enter labeling mode")
+        print("  6. LEFT-CLICK confused words, RIGHT-CLICK confused sentences")
+        print("  7. Press 'C' again to resume reading and data collection")
+        print("  8. Your cursor position tracks which word you're reading")
         print("  7. Click 'Stop Recording' to save data")
         print("  8. Data auto-saves on exit if recording")
         
-        print("\n💾 DATA FORMAT:")
+        print("\n[DATA] FORMAT:")
         print("  • EEG: 4 channels (TP9, AF7, AF8, TP10)")
         print("  • fNIRS: 8 values (4 normalized + 4 raw)")
         print("  • Events: Timestamped confusion markers with clicked words")
@@ -1673,7 +1734,7 @@ class MuseAthenaVisualizer:
         self.setup_visualization()
         
         # Create and open teleprompter window
-        print("\n🖥️ Opening teleprompter window...")
+        print("\n[SYSTEM] Opening teleprompter window...")
         self.teleprompter = TeleprompterWindow(self)
         
         # Start teleprompter update loop
@@ -1734,7 +1795,7 @@ class MuseAthenaVisualizer:
         )
         
         print("\n✅ Visualization started!")
-        print("🖥️ Teleprompter window should be open - focus it to use controls")
+        print("[SYSTEM] Teleprompter window should be open - focus it to use controls")
         print("First 5 EEG and fNIRS packets will be printed for verification.")
         print("\n" + "="*60)
         

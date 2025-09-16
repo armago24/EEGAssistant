@@ -15,6 +15,7 @@ from sklearn.metrics import classification_report, confusion_matrix, roc_curve, 
 import xgboost as xgb
 from collections import defaultdict
 import warnings
+import pickle
 warnings.filterwarnings('ignore')
 
 class WordConfusionDetector:
@@ -849,6 +850,43 @@ Key Insights:
         print("\nMost predictive features for your confusion:")
         for i, idx in enumerate(top_features):
             print(f"  {i+1}. {model_results['feature_names'][idx]}")
+    
+    def save_model_for_realtime(self, training_results, output_path='confusion_model.pkl'):
+        """Save the trained model and necessary components for real-time use"""
+        
+        # Package everything needed for real-time prediction
+        model_package = {
+            'classifier': training_results['classifier'],
+            'scaler': training_results['scaler'],
+            'feature_names': training_results['feature_names'],
+            'feature_importances': training_results['feature_importances'],
+            'metadata': {
+                'device': 'Muse S Athena',
+                'sample_rate': self.sample_rate,
+                'window_size': 2.0,  # seconds
+                'eeg_channels': self.channels,
+                'fnirs_channels': ['Ch1_norm', 'Ch2_norm', 'Ch3_norm', 'Ch4_norm'] if self.fnirs is not None else None
+            }
+        }
+        
+        # Save as pickle
+        with open(output_path, 'wb') as f:
+            pickle.dump(model_package, f)
+        
+        print(f"\n{'='*40}")
+        print("MODEL SAVED FOR REAL-TIME USE")
+        print(f"{'='*40}")
+        print(f"Model saved to: {output_path}")
+        print(f"Model type: {type(training_results['classifier']).__name__}")
+        print(f"Features: {len(training_results['feature_names'])}")
+        print(f"Classes: Baseline (0), Word Confusion (1), Sentence Confusion (2)")
+        print(f"Sample rate: {self.sample_rate} Hz")
+        print(f"EEG channels: {', '.join(self.channels)}")
+        if self.fnirs is not None:
+            print(f"fNIRS channels: 4 normalized channels")
+        print("\nThis model can now be loaded in real-time applications!")
+        
+        return model_package
 
 def main():
     """Main function"""
@@ -908,6 +946,10 @@ def main():
     # Train model
     results = detector.train_word_model(X, y, words)
     
+    # Save model for real-time use
+    model_filename = f"mo{os.path.basename(filepath).replace('.npz', '')}.pkl"
+    detector.save_model_for_realtime(results, model_filename)
+    
     # Visualize results
     detector.plot_results(results)
     
@@ -918,13 +960,17 @@ def main():
     print("ANALYSIS COMPLETE")
     print("="*60)
     print("\nThe model can now identify specific words that confuse you!")
+    print(f"\n✓ Trained model saved as: {model_filename}")
+    print("✓ Model is ready for real-time deployment!")
     print("\nKey improvements in this version:")
     print("  • Analyzes individual WORDS, not just time windows")
     print("  • Uses clicked words as ground truth labels")
     print("  • Incorporates fNIRS hemodynamic data")
     print("  • Tracks word characteristics and confusion history")
     print("  • Can highlight confusing words in real-time while reading")
+    print("  • Automatically saves trained model for deployment")
     print("\nNext steps for deployment:")
+    print(f"  • Load the saved model: {model_filename}")
     print("  • Stream data in real-time while reading")
     print("  • Highlight predicted confusing words in the text")
     print("  • Build personalized confusion profile over time")

@@ -34,41 +34,13 @@ import sys
 
 # Training text with deliberately confusing elements
 TRAINING_TEXTS = [
-"""2.3. Extracellular electrical stimulation — The extracellular tissue medium was approximated as an isotropic ohmic conductor. A disk electrode acting as a current source with ground located at infinity was placed below (∼10 µm) the modeled RGC. Since the extracellular domain was isotropic, the extracellular voltage at each point in space was calculated in a similar fashion to previous work [16] (equation (5)). R is the radius of the disk electrode (5 µm), I is the stimulation current, and ρe is the extracellular resistivity (1000 Ω·cm). A large range of resistivity values for the ganglion cell layer is reported (500–7900 Ω·cm). Here, 1000 Ω·cm, used in several studies, best matched the experimental data. The electrode array was placed 10 µm below the nerve-fiber layer.""",
+"""
+Abstract   Biohybrid Peripheral Neural Interfaces: Combining Cell Transplantation and Flexible  Electronics for Functional Neurological Restoration.   Amy Elizabeth Rochford.   Peripheral nerve injuries result in a disconnection in the nervous system communication and  a consequent loss in neurological function. Currently, there is very limited treatment for these  conditions. Neuroprosthetics and cell transplantation are promising approaches to restore  lost neurological function: the former aims to bypass the site of injury, connecting directly  one part of the nervous system to another (or a prosthetic limb); while the latter aims to  repair the injury site. To date, both strategies have shown limited efficacy and lifetime 
+""",
 
-"""Electrical stimuli consisted of triphasic charge-balanced pulses with relative current amplitudes 2:−3:1 and duration of 50 µs per phase (150 µs total), matching experimental stimulation parameters. The activation threshold was defined as the lowest current amplitude required to elicit a spike. For multi-electrode stimulation, for each fixed ratio of current levels through the electrodes, the smallest current amplitude combination that produced a spike was identified as the activation threshold.""",
-
-"""2.4. Stochastic spiking — To model stochastic spiking, a Gaussian noise membrane current was added to the total ionic membrane currents as described in previous work. The noise current was on the order of microamps and was proportional to the square root of the number of sodium channels. It was independently added to each segment n in the model according to equation (6): Inoise,n = N · knoise · √(An · gNa), where N is a Gaussian noise draw (µ = 0; σ = 1) at each time step (0.005 ms), knoise was 0.0004 to best match data, An denotes membrane area (cm2), and gNa is the maximum sodium conductance at that segment.""",
-
-"""2.5. Determination of threshold and tracking the locus of spike initiation — To determine if the model cell spiked, the membrane potential at the far distal end of the model axon was monitored. If the membrane potential crossed 0 mV within 10 ms of stimulus onset, the model cell was considered to have spiked. For each fixed ratio of current levels passed through multiple electrodes, the smallest current amplitude combination that produced a spike was taken as the activation threshold. The segment in which the membrane potential first crossed 0 mV after completion of the stimulus pulse was taken as the site of spike initiation. When several neighboring segments crossed simultaneously, the center of that region was used.""",
-
-"""2.6. Nonlinearity index — A nonlinearity index was calculated to assess the degree of nonlinear current summation in two-electrode stimulation. For placements of a pair of electrodes across the somatic and dendritic regions, activation thresholds were computed for various fixed current ratios. An ellipse was fitted to the collection of activation thresholds in the 2D space of current levels using least squares. The index was defined as the ratio of the lengths of the minor and major axes of the fitted ellipse, ranging from 0 (linearly summating, infinitely stretched ellipse) to 1 (highly nonlinear, circle). This was repeated for four orientations of the electrode pair; the maximum value across rotations was used.""",
-
-"""2.7. Experimental setup — A custom 512-electrode system was used to stimulate and record from RGCs in isolated rhesus macaque retinas. Eyes were obtained from terminally anesthetized animals euthanized during other research. Procedures followed institutional and national guidelines. Eyes were hemisected, vitreous removed, and the posterior portion kept in darkness in warm (35 ◦C), oxygenated, bicarbonate buffered Ames solution. Patches of retina ∼3 mm on a side were isolated under infrared light, placed RGC side down on the multielectrode array, and superfused with Ames solution. The array had 512 electrodes (10 µm diameter) with 30 µm pitch, covering 0.43 mm2.""",
-
-"""Within an experiment, platinization produced relatively uniform noise (∼6% standard deviation) across electrodes. A platinum wire encircling the recording chamber (∼1 cm diameter) served as the distant return electrode. Voltage recordings were band-pass filtered between 43 and 5000 Hz and sampled at 20 kHz. Spikes from individual RGCs in the voltage recordings were identified and sorted using standard techniques.""",
-
-"""2.8. Visual stimulation and cell type classification — To identify the RGC types recorded, the retina was visually stimulated with a dynamic white noise stimulus, and the spike-triggered average (STA) stimulus was computed for each RGC, as previously described. The STA summarizes the spatial, temporal, and chromatic properties of light response. Clustering on the spatial (receptive field size) and temporal (time course) components of the STA was performed to identify distinct cell types, as previously described. Analysis focused on ON and OFF parasol RGCs due to the high SNR of their recorded spikes, which aided reliable spike sorting in the presence of electrical artifacts.""",
-
-"""2.9. Electrical image (EI) — The EI represents the average spatiotemporal pattern of voltage deflections produced on each electrode of the array during a spike from a given cell. EIs were calculated from data recorded during visual stimulation and served as spatiotemporal templates for the spike waveforms of the cells to be detected during electrical stimulation. The spatial positions of relevant cell compartments (axon and soma) relative to the electrode array were estimated using the EI. Triphasic waveforms indicated axon recordings, biphasic with a positive first phase indicated dendrite, and biphasic with a negative first phase indicated soma. A spatial correlation metric compared modeled and empirical EIs across electrodes.""",
-
-"""2.10. Electrical stimulation — Electrical stimulation was provided through one or more electrodes while recording RGC activity from all electrodes. Three types of stimulation patterns were tested: single-electrode, two-electrode, and three-electrode stimulation. Single-electrode stimulation consisted of a charge-balanced, triphasic pulse passed through one electrode. The negative polarity stimulus had anodal/cathodal/anodal phases with relative current amplitudes 2:−3:1 and 50 µs per phase (150 µs total). The positive polarity stimulus had phases flipped to cathodal/anodal/cathodal. Single-electrode stimulation was delivered in 25 repeated trials at 40 logarithmically spaced current amplitudes (10% increments) between 0.1 and 4 µA.""",
-
-"""Two-electrode and three-electrode stimulation consisted of triphasic, charge-balanced current simultaneously passed through two or three adjacent electrodes, respectively. The stimulating electrodes were chosen based on the highest SNR of recorded spikes from the target cell and on geometric positioning relative to the target cell. Stimulation was supplied for 20 trials at 20 linearly spaced current amplitudes between −1.8 and 1.8 µA. Thus, for two-electrode and three-electrode stimulation, 400 and 8000 unique current combinations were tested, respectively. The ordering of patterns was pseudo-random, with successive stimulating groups placed far apart to avoid stimulating the same cells in rapid succession.""",
-
-"""2.11. Responses to electrical stimulation — The spikes recorded during electrical stimulation were analyzed using a custom template matching approach. First, the EI of each cell from visual stimulation served as a template for spike waveforms to be detected during electrical stimulation. An automated algorithm separated spikes from the electrical artifact by grouping traces according to an artifact waveform estimate and each cell’s spike waveform. The resulting electrically elicited spike waveforms were visually inspected for sorting errors and manually corrected as needed. For single-electrode stimulation, spike probabilities were computed across trials at each current amplitude and modeled by a sigmoid; activation threshold was the current giving 0.5 probability.""",
-
-"""For two-electrode stimulation, spike probabilities were computed across trials for all current combinations. In the 2D current space, 30 direction vectors starting at the origin and extending radially represented fixed current ratios. For each ratio, nearby data were gathered and a sigmoid was fitted. The point along that vector producing 0.5 spiking probability was denoted the two-electrode activation threshold. The arrangement of thresholds was examined to test linearity of summation: linear combination yields thresholds on a line (or two opposite lines for biphasic pulses). For three-electrode stimulation, spike probabilities were computed across all combinations; thresholds were not computed.""",
-
-"""3. Results — To investigate the mechanisms underlying RGC responses to multi-electrode stimulation, we developed a biophysical model and validated it against data from ex vivo preparations of the macaque retina collected with a large-scale, high-density microelectrode array (512 electrodes, 30 µm pitch, 10 µm diameter). Below, we demonstrate the model’s ability to reproduce a wide range of empirical findings, such as stereotypical voltage waveforms of recorded spikes and sigmoidal response probabilities as a function of stimulation current level. We then show that current passed through multiple electrodes sometimes sums linearly and sometimes nonlinearly, depending on electrode geometry, and validate this with empirical data. Finally we test whether shifts in the locus of spike initiation can explain nonlinear summation.""",
-
-"""3.1. Modeling single-electrode stimulation and recording — The model captured salient properties of large-scale extracellular voltage recording from RGCs. The modeled EI—the spatiotemporal voltage pattern recorded across the array during a spike—closely matched the experimentally observed EI (figure 2, middle). The modeled axonal recording was triphasic, and at the soma and dendrites was biphasic with opposing polarity (figure 2, top). The spatial correlation coefficient between the simulated EI and empirical EI for the five cells examined was 0.82 ± 0.09 (mean ± SD). A shortcoming was that the temporal dynamics of modeled spikes were slower than observed experimentally (see Discussion).""",
-
-"""Essential properties of spikes evoked by extracellular stimulation were captured. Spikes were evoked using current levels similar to experiment, with the lowest activation threshold (∼1 µA) near the axon initial segment, consistent with previous work (figure 2, bottom). Within the single-electrode current range tested, dendritic activation and upper threshold phenomenon were not observed, though they appeared at larger currents (not shown). The model reproduced sigmoidal response probability versus current. Sigmoid slopes varied inversely with threshold (0.5 probability) consistent with data. In the stochastic model, threshold matched the lowest current causing a spike in the non-stochastic model; thus subsequent analyses used the non-stochastic model.""",
-
-"""3.2. Two-electrode stimulation: linear and nonlinear responses — Previous work has shown that currents passed simultaneously through multiple electrodes can combine linearly or nonlinearly to drive RGC response. A potential explanation is that currents combine nonlinearly if the electrodes target distinct spike initiation sites on the cell. The model exhibited both linear and nonlinear current summation, matching experiments, and spike initiation was analyzed to test the multi-site activation hypothesis. When electrodes were placed close to the axon (<40 µm) and oriented perpendicular to it, thresholds formed two parallel lines, indicating linear summation. Rotating the pair toward parallel produced curved, closed shapes, indicating nonlinear summation, consistent with distinct activation sites.""",
-
-"""The activation sites identified from the earliest supra-threshold voltage were tightly localized along the axon for linear cases, and spread with two peaks aligned with the electrodes for nonlinear cases, shifting as current dominance moved between electrodes. When the electrode pair was parallel to the axon but moved away from it, nonlinearity decreased; beyond ~40 µm, currents combined approximately linearly. At longer distances, radial dispersion caused overlapping axonal targets and linear summation; at shorter distances, distinct regions led to nonlinear summation. In linear cases the activation region was tightly localized; in nonlinear cases, it broadened with peaks near each electrode.""",
+"""
+due to  several challenges. However, a combinational approach of implantable electronics and stem  cell-derived cells for functional neurological restoration could address these issues. The  integration between implantable electronics and existing tissue is of paramount importance,  this biohybrid strategy with the incorporation of cells may allow for a ‘controllable’ synaptic  integration between implanted cells and existing circuitry. Attributes to such a biohybrid  implant are: an ability to host and interact with stem-cell derived cells; promotion of  organised functional cellular integration with living tissue; and restoration of lost function.   Here I report the new design of a biohybrid peripheral nerve multielectrode neural 
+""",
 ]
 
 class TeleprompterWindow:
@@ -76,7 +48,7 @@ class TeleprompterWindow:
     def __init__(self, parent_visualizer):
         self.parent = parent_visualizer
         self.root = tk.Tk()
-        self.root.title("[READING] MATERIAL - Confusion Detection Training")
+        self.root.title("👁 READING MATERIAL - Confusion Detection Training")
         
         # Make window large
         self.root.geometry("1200x800")
@@ -90,9 +62,6 @@ class TeleprompterWindow:
         self.current_word_index = ""
         self.cursor_update_interval = 50  # milliseconds
         self.last_cursor_update = 0
-
-        # Delayed labeling mode
-        self.labeling_mode = False
         
         # Header frame
         header_frame = tk.Frame(self.root, bg='#1a1a1a', height=80)
@@ -101,19 +70,19 @@ class TeleprompterWindow:
         
         # Title label
         title_label = tk.Label(header_frame, 
-                               text="[TRAINING] CONFUSION DETECTION TRAINING",
+                               text="👁 CONFUSION DETECTION TRAINING",
                                font=('Arial', 24, 'bold'),
                                fg='#FFD93D',
                                bg='#1a1a1a')
         title_label.pack(pady=10)
         
         # Instructions label
-        self.instructions = tk.Label(header_frame,
-                               text="Read paragraph, press 'C' to label confusion, then press 'C' again to continue reading",
+        instructions = tk.Label(header_frame,
+                               text="LEFT-CLICK word for word confusion | RIGHT-CLICK word for sentence/idea confusion | Cursor tracks current word",
                                font=('Arial', 14),
                                fg='#4ECDC4',
                                bg='#1a1a1a')
-        self.instructions.pack()
+        instructions.pack()
         
         # Main text frame
         text_frame = tk.Frame(self.root, bg='#0a0a0a')
@@ -154,7 +123,7 @@ class TeleprompterWindow:
         self.text_status.pack(side=tk.LEFT, padx=20, pady=10)
         
         self.recording_status = tk.Label(status_frame,
-                                        text="[STOP] NOT RECORDING",
+                                        text="⏺ NOT RECORDING",
                                         font=('Arial', 16, 'bold'),
                                         fg='#888888',
                                         bg='#1a1a1a')
@@ -177,7 +146,7 @@ class TeleprompterWindow:
         
         # Navigation hints
         nav_label = tk.Label(status_frame,
-                           text="Up/Down: Scroll | Left/Right: Change Text | Space: Start/Stop Recording | +/-: Font Size | C: Toggle Labeling Mode",
+                           text="↑/↓: Scroll | ←/→: Change Text | Space: Start/Stop Recording | +/-: Font Size",
                            font=('Arial', 12),
                            fg='#888888',
                            bg='#1a1a1a')
@@ -190,14 +159,6 @@ class TeleprompterWindow:
                                        fg='#FF6B6B',
                                        bg='#1a1a1a')
         self.last_click_label.pack(side=tk.BOTTOM, padx=20, pady=2)
-
-        # Labeling mode indicator
-        self.mode_indicator = tk.Label(status_frame,
-                                     text="[READING] MODE - Data Recording",
-                                     font=('Arial', 14, 'bold'),
-                                     fg='#96CEB4',
-                                     bg='#1a1a1a')
-        self.mode_indicator.pack(side=tk.BOTTOM, padx=20, pady=2)
         
         # Bind keyboard events
         self.root.bind('<Key>', self.on_key_press)
@@ -221,22 +182,18 @@ class TeleprompterWindow:
         self.track_cursor()
         
     def on_left_click(self, event):
-        """Handle left click - word confusion (only in labeling mode)"""
+        """Handle left click - word confusion"""
         if not self.parent.is_recording:
             messagebox.showinfo("Not Recording", "Start recording first before marking confusion events.")
             return
-
-        if not self.labeling_mode:
-            messagebox.showinfo("Not in Labeling Mode", "Press 'C' to enter labeling mode first, then click on confused words.")
-            return
-
+            
         # Get the word at click position
         try:
             index = self.text_display.index(f"@{event.x},{event.y}")
             word_start = self.text_display.index(f"{index} wordstart")
             word_end = self.text_display.index(f"{index} wordend")
             clicked_word = self.text_display.get(word_start, word_end).strip()
-
+            
             if clicked_word:
                 # Record the event with the specific word
                 self.parent.record_event('word_confusion', clicked_word)
@@ -246,22 +203,18 @@ class TeleprompterWindow:
             print(f"Error getting clicked word: {e}")
     
     def on_right_click(self, event):
-        """Handle right click - sentence/idea confusion (only in labeling mode)"""
+        """Handle right click - sentence/idea confusion"""
         if not self.parent.is_recording:
             messagebox.showinfo("Not Recording", "Start recording first before marking confusion events.")
             return
-
-        if not self.labeling_mode:
-            messagebox.showinfo("Not in Labeling Mode", "Press 'C' to enter labeling mode first, then click on confused words/sentences.")
-            return
-
+            
         # Get the word at click position (as reference point for the confusing sentence)
         try:
             index = self.text_display.index(f"@{event.x},{event.y}")
             word_start = self.text_display.index(f"{index} wordstart")
             word_end = self.text_display.index(f"{index} wordend")
             clicked_word = self.text_display.get(word_start, word_end).strip()
-
+            
             if clicked_word:
                 # Record the event with the specific word as reference
                 self.parent.record_event('sentence_confusion', clicked_word)
@@ -295,10 +248,9 @@ class TeleprompterWindow:
                 self.current_word = word
                 self.current_word_index = word_start
                 self.word_status.config(text=f"Current word: {word}")
-
-                # Update parent's current word (but not during labeling mode)
-                if not self.labeling_mode:
-                    self.parent.current_word = word
+                
+                # Update parent's current word
+                self.parent.current_word = word
                 
         except Exception as e:
             # Ignore errors from invalid positions
@@ -308,9 +260,7 @@ class TeleprompterWindow:
         """Handle mouse leaving the text area"""
         self.current_word = ""
         self.current_word_index = ""
-        # Only update parent during reading mode
-        if not self.labeling_mode:
-            self.parent.current_word = ""
+        self.parent.current_word = ""
         self.word_status.config(text="Current word: -")
     
     def track_cursor(self):
@@ -377,8 +327,6 @@ class TeleprompterWindow:
                 current_size = 28
             new_size = max(current_size - 2, 16)
             self.text_display.config(font=('Georgia', new_size, 'normal'))
-        elif event.char.lower() == 'c':
-            self.toggle_labeling_mode()
         # Legacy keyboard shortcuts (optional - can be removed)
         elif event.char == '1':
             self.parent.record_event('marker_1', self.current_word)
@@ -448,7 +396,7 @@ class TeleprompterWindow:
         if self.parent.is_recording:
             elapsed = time.time() - self.parent.recording_start_time
             self.recording_status.config(
-                text=f"[REC] RECORDING: {elapsed:.1f}s",
+                text=f"⏺ RECORDING: {elapsed:.1f}s",
                 fg='#ff4444'
             )
             
@@ -463,39 +411,10 @@ class TeleprompterWindow:
             )
         else:
             self.recording_status.config(
-                text="[STOP] NOT RECORDING",
+                text="⏺ NOT RECORDING",
                 fg='#888888'
             )
-
-    def toggle_labeling_mode(self):
-        """Toggle between reading mode and labeling mode"""
-        self.labeling_mode = not self.labeling_mode
-
-        if self.labeling_mode:
-            self.mode_indicator.config(
-                text="[LABELING] MODE - Data Collection PAUSED",
-                fg='#FFD93D'
-            )
-            self.instructions.config(
-                text="LEFT-CLICK confused words | RIGHT-CLICK confused sentences | Press 'C' to resume reading",
-                fg='#FFD93D'
-            )
-            # Change background to indicate labeling mode
-            self.text_display.config(bg='#0f0f0a')  # Slight yellow tint
-            print("\n[LABELING] MODE: Data collection paused. Click on confused words/sentences.")
-        else:
-            self.mode_indicator.config(
-                text="[READING] MODE - Data Recording",
-                fg='#96CEB4'
-            )
-            self.instructions.config(
-                text="Read paragraph, press 'C' to label confusion, then press 'C' again to continue reading",
-                fg='#4ECDC4'
-            )
-            # Restore normal background
-            self.text_display.config(bg='#0a0a0a')
-            print("\n[READING] MODE: Data collection resumed. Continue reading.")
-
+    
     def on_close(self):
         """Handle window close"""
         self.active = False
@@ -709,11 +628,7 @@ class MuseAthenaVisualizer:
         args = message['args']
         type_tags = message['type_tags']
         timestamp = time.time()
-
-        # Skip data collection if in labeling mode
-        if self.teleprompter and self.teleprompter.active and self.teleprompter.labeling_mode:
-            return
-
+        
         with self.lock:
             # Parse address: /username/datatype
             parts = address.strip('/').split('/')
@@ -815,14 +730,14 @@ class MuseAthenaVisualizer:
     def next_text(self):
         """Move to the next text passage"""
         self.current_text_index = (self.current_text_index + 1) % len(TRAINING_TEXTS)
-        print(f"\n[TEXT] Switched to text {self.current_text_index + 1}/{len(TRAINING_TEXTS)}")
+        print(f"\n📖 Switched to text {self.current_text_index + 1}/{len(TRAINING_TEXTS)}")
         if self.teleprompter and self.teleprompter.active:
             self.teleprompter.update_display()
     
     def previous_text(self):
         """Move to the previous text passage"""
         self.current_text_index = (self.current_text_index - 1) % len(TRAINING_TEXTS)
-        print(f"\n[TEXT] Switched to text {self.current_text_index + 1}/{len(TRAINING_TEXTS)}")
+        print(f"\n📖 Switched to text {self.current_text_index + 1}/{len(TRAINING_TEXTS)}")
         if self.teleprompter and self.teleprompter.active:
             self.teleprompter.update_display()
     
@@ -924,15 +839,13 @@ class MuseAthenaVisualizer:
             print(f"RECORDING STARTED at {datetime.fromtimestamp(self.recording_start_time).strftime('%Y-%m-%d %H:%M:%S')}")
             print(f"{'='*50}")
             print("\n👁 CURSOR TRACKING ACTIVE - Recording words under cursor")
-            print("\n🖱️ DELAYED CONFUSION LABELING:")
-            print("  1. Read paragraph completely (data recording)")
-            print("  2. Press 'C' to enter labeling mode (data recording pauses)")
-            print("  3. LEFT-CLICK confused words, RIGHT-CLICK confused sentences")
-            print("  4. Press 'C' again to resume reading (data recording resumes)")
+            print("\n🖱️ CONFUSION MARKERS:")
+            print("  LEFT-CLICK = Word confusion (click the confusing word)")
+            print("  RIGHT-CLICK = Sentence/idea confusion (click any word in the confusing sentence)")
             print("  '1', '2', '3' = Other markers (optional)")
             print("\n📖 TEXT NAVIGATION (in teleprompter window):")
-            print("  Up/Down = Scroll text")
-            print("  Left/Right = Previous/Next passage")
+            print("  ↑/↓ = Scroll text")
+            print("  ←/→ = Previous/Next passage")
             print("\nData will be saved as .npz file when recording stops")
         else:
             # Stop recording
@@ -989,11 +902,11 @@ class MuseAthenaVisualizer:
             
             # Special messages for confusion events
             if event_type == 'word_confusion':
-                print(f"[WORD] confusion marked at {relative_time:.2f}s on '{clicked_word}'")
+                print(f"🤔 WORD confusion marked at {relative_time:.2f}s on '{clicked_word}'")
             elif event_type == 'sentence_confusion':
-                print(f"[SENT] confusion marked at {relative_time:.2f}s near '{clicked_word}'")
+                print(f"📄 SENTENCE confusion marked at {relative_time:.2f}s near '{clicked_word}'")
             else:
-                print(f"[EVENT] '{event_type}' marked at {relative_time:.2f}s")
+                print(f"📌 Event '{event_type}' marked at {relative_time:.2f}s")
             
             # Update teleprompter if active
             if self.teleprompter and self.teleprompter.active:
@@ -1677,21 +1590,21 @@ class MuseAthenaVisualizer:
         print("\n" + "="*60)
         print("   MUSE S ATHENA - CONFUSION DETECTION WITH CLICK TRACKING")
         print("="*60)
-        print(f"\n[RECEIVER] Listening for OSC data on UDP port {self.port}")
-        print("\n[TRACKING] WORD TRACKING MODE ACTIVE")
-        print("\n[LABELING] DELAYED CONFUSION LABELING (use in teleprompter window):")
-        print("  Read -> Press 'C' -> Click confused words/sentences -> Press 'C' -> Continue reading")
-        print("  This separates reading (EEG recording) from labeling (EEG paused)")
+        print(f"\n📡 Listening for OSC data on UDP port {self.port}")
+        print("\n👁 WORD TRACKING MODE ACTIVE")
+        print("\n🖱️ CONFUSION MARKERS (use in teleprompter window):")
+        print("  LEFT-CLICK = Click on the word that confuses you")
+        print("  RIGHT-CLICK = Click on any word in a confusing sentence/idea")
         print("  '1','2','3' = Optional keyboard markers")
         
-        print("\n[CONTROLS] TELEPROMPTER CONTROLS:")
-        print("  Up/Down = Scroll text up/down")
-        print("  Left/Right = Previous/Next text passage")
+        print("\n📖 TELEPROMPTER CONTROLS:")
+        print("  ↑/↓ = Scroll text up/down")
+        print("  ←/→ = Previous/Next text passage")
         print("  Space = Start/Stop recording")
         print("  +/- = Increase/decrease font size")
         print("  Cursor tracks which word you're reading")
         
-        print("\n[CONTROLS] VISUALIZER CONTROLS:")
+        print("\n🖥️ VISUALIZER CONTROLS:")
         print("  '+'/'-' = Increase/decrease time window")
         print("  'r' = Reset buffers")
         print("  'q' = Quit (saves data if recording)")
@@ -1700,15 +1613,13 @@ class MuseAthenaVisualizer:
         print("  1. Teleprompter window will open automatically")
         print("  2. Click 'Begin Recording' or press Space to start")
         print("  3. Read the displayed text carefully")
-        print("  4. Read paragraph completely")
-        print("  5. Press 'C' to pause data collection and enter labeling mode")
-        print("  6. LEFT-CLICK confused words, RIGHT-CLICK confused sentences")
-        print("  7. Press 'C' again to resume reading and data collection")
-        print("  8. Your cursor position tracks which word you're reading")
+        print("  4. LEFT-CLICK directly on words that confuse you")
+        print("  5. RIGHT-CLICK on any word in sentences that are confusing")
+        print("  6. Your cursor position tracks which word you're reading")
         print("  7. Click 'Stop Recording' to save data")
         print("  8. Data auto-saves on exit if recording")
         
-        print("\n[DATA] FORMAT:")
+        print("\n💾 DATA FORMAT:")
         print("  • EEG: 4 channels (TP9, AF7, AF8, TP10)")
         print("  • fNIRS: 8 values (4 normalized + 4 raw)")
         print("  • Events: Timestamped confusion markers with clicked words")
@@ -1734,7 +1645,7 @@ class MuseAthenaVisualizer:
         self.setup_visualization()
         
         # Create and open teleprompter window
-        print("\n[SYSTEM] Opening teleprompter window...")
+        print("\n🖥️ Opening teleprompter window...")
         self.teleprompter = TeleprompterWindow(self)
         
         # Start teleprompter update loop
@@ -1795,7 +1706,7 @@ class MuseAthenaVisualizer:
         )
         
         print("\n✅ Visualization started!")
-        print("[SYSTEM] Teleprompter window should be open - focus it to use controls")
+        print("🖥️ Teleprompter window should be open - focus it to use controls")
         print("First 5 EEG and fNIRS packets will be printed for verification.")
         print("\n" + "="*60)
         

@@ -35,11 +35,195 @@ import sys
 # Training text with deliberately confusing elements
 TRAINING_TEXTS = [
 """
-Abstract   Biohybrid Peripheral Neural Interfaces: Combining Cell Transplantation and Flexible  Electronics for Functional Neurological Restoration.   Amy Elizabeth Rochford.   Peripheral nerve injuries result in a disconnection in the nervous system communication and  a consequent loss in neurological function. Currently, there is very limited treatment for these  conditions. Neuroprosthetics and cell transplantation are promising approaches to restore  lost neurological function: the former aims to bypass the site of injury, connecting directly  one part of the nervous system to another (or a prosthetic limb); while the latter aims to  repair the injury site. To date, both strategies have shown limited efficacy and lifetime 
+Abstract
 """,
 
 """
-due to  several challenges. However, a combinational approach of implantable electronics and stem  cell-derived cells for functional neurological restoration could address these issues. The  integration between implantable electronics and existing tissue is of paramount importance,  this biohybrid strategy with the incorporation of cells may allow for a ‘controllable’ synaptic  integration between implanted cells and existing circuitry. Attributes to such a biohybrid  implant are: an ability to host and interact with stem-cell derived cells; promotion of  organised functional cellular integration with living tissue; and restoration of lost function.   Here I report the new design of a biohybrid peripheral nerve multielectrode neural 
+Biohybrid Peripheral Neural Interfaces: Combining Cell Transplantation and Flexible Electronics for Functional Neurological Restoration.
+""",
+
+"""
+Amy Elizabeth Rochford.
+""",
+
+"""
+Peripheral nerve injuries result in a disconnection in the nervous system communication and a consequent loss in neurological function.
+""",
+
+"""
+Currently, there is very limited treatment for these conditions.
+""",
+
+"""
+Neuroprosthetics and cell transplantation are promising approaches to restore lost neurological function: the former aims to bypass the site of injury, connecting directly one part of the nervous system to another (or a prosthetic limb); while the latter aims to repair the injury site.
+""",
+
+"""
+To date, both strategies have shown limited efficacy and lifetime due to several challenges.
+""",
+
+"""
+However, a combinational approach of implantable electronics and stem cell-derived cells for functional neurological restoration could address these issues.
+""",
+
+"""
+The integration between implantable electronics and existing tissue is of paramount importance, this biohybrid strategy with the incorporation of cells may allow for a ‘controllable’ synaptic integration between implanted cells and existing circuitry.
+""",
+
+"""
+Attributes to such a biohybrid implant are: an ability to host and interact with stem-cell derived cells; promotion of organised functional cellular integration with living tissue; and restoration of lost function.
+""",
+
+"""
+Here I report the new design of a biohybrid peripheral nerve multielectrode neural interface device.
+""",
+
+"""
+My devices are fabricated using photolithography and chemical etching techniques to establish a functional electronic device.
+""",
+
+"""
+This multielectrode neural device contains 32 electrodes.
+""",
+
+"""
+Each electrode consisting of planar gold, coated with a conducting polymer (PEDOT:PSS) to decrease the electrode impedance and improve the signal to noise ratio.
+""",
+
+"""
+The layers of Parylene C give a desirable stiffness compatible with that of native nerve.
+""",
+
+"""
+The device hosts iPSC derived myocytes on the electrically active surface, allowing their efficient electrical recording.
+""",
+
+"""
+I have shown survival of human iPSC derived muscle in a rat for up to seven days post implantation in a rat model.
+""",
+
+"""
+I have developed a strong bonded hydrogel that allows for biofabrication on top of flexible electronics.
+""",
+
+"""
+Finally, I showed long term recordings from my biohybrid neural interfaces in a chronic rat peripheral nerve injury model for 30 days duration.
+""",
+
+"""
+4
+""",
+
+"""
+These findings strongly suggest that biohybrid peripheral neural interfaces could be an efficient way to record the peripheral nervous system in a rat peripheral nerve injury model.
+""",
+
+"""
+5
+""",
+
+"""
+Acknowledgements
+""",
+
+"""
+A huge thank you to my Advisor Dr. Damiano Barone who has challenged me at every step of the way and given me support throughout this exciting project and who has gone above and beyond to find collaborators when I have said I’d like certain cell types.
+""",
+
+"""
+I would like to thank my Supervisor, Professor George Malliaras, for the patient guidance, encouragement and advice he has provided throughout this PhD and for creating such a great group ethos and working environment that is a pleasure to work in.
+""",
+
+"""
+Thank you to my mentor Dr. Alexandra Rutz for all her advice related to my project and personal development at graduate school and all-round great support.
+""",
+
+"""
+Thank you to Dr Vincenzo Curto, the master of fabrication for teaching me everything I need to know in the cleanroom.
+""",
+
+"""
+A special thank you to Dr Alejandro Carciner-Lombarde for always being so helpful with any neuroscience question I have, for being such a great role model to me throughout my entire PhD and keeping me sane during long surgery days.
+""",
+
+"""
+Thank you to my fellow PhD lab mates Tanya, Shao-Tuan, Malak, Ben and Elise who have been great friends and have made it a pleasure to go to the lab every day.
+""",
+
+"""
+I would also like to thank my collaborators Dr Mark Kotter and his colleagues at BitBio for their guidance related to OPTI-OX human iPSC derived muscle cells which had been a key part of this thesis and the development of the biohybrid peripheral neural interface.
+""",
+
+"""
+Additionally, my collaborators Dr Ivo Lieberam and Dr Ieva Berzaskyte for all their help and guidance with motor neuron cell culture.
+""",
+
+"""
+I am grateful to the Engineering and Physical Sciences Research Council for providing me with the funding necessary to undertake this PhD project.
+""",
+
+"""
+I would also like to thank all the friends I met at Kings College, including Priti, Solveig and Carly who have endured the stories of a mad scientist for some time now.
+""",
+
+"""
+A huge thanks to my tutor Professor Francesco Colucci for some enjoyable walks around Kings and great book recommendations.
+""",
+
+"""
+Thank you to all the women I have played Lacrosse with at CUWLC for the past three years, who honoured me with my university blues.
+""",
+
+"""
+Thank you to my Cambridge friends and my sister Phoebe that stuck it out with me in Cambridge during the pandemic in 2020.
+""",
+
+"""
+Thank you for all the cold walks, the socially
+""",
+
+"""
+6
+""",
+
+"""
+distanced picnics, the yoga in the park, cycle rides, vegetable growing, pints from the snug window (Free Press) and the list goes on.
+""",
+
+"""
+These are the things that kept me sane in a world that appeared to stand still for some time.
+""",
+
+"""
+Finally, I would like to thank my Family.
+""",
+
+"""
+My Grandparents, Parents and Sisters for the endless support they have given me throughout this PhD.
+""",
+
+"""
+They have always been there to celebrate the cell survival successes and picked up the phone when things have been hard.
+""",
+
+"""
+I would not be here without them and owe them a world of gratitude.
+""",
+
+"""
+The real MVP of my entire PhD is Hugo.
+""",
+
+"""
+Thank you for the day in, day out listening to my crazy scientific ideas and always telling me to “go for it!”
+""",
+
+"""
+Thank you for always being there for me when times have been hard, especially during the pandemic.
+""",
+
+"""
+A special mention to our cat Newton who has made our Cambridge life that bit more special and entertaining.
 """,
 ]
 
@@ -56,6 +240,9 @@ class TeleprompterWindow:
         
         # Track if window is active
         self.active = True
+
+        # Labeling mode state
+        self.labeling_mode = False
         
         # Cursor tracking variables
         self.current_word = ""
@@ -78,7 +265,7 @@ class TeleprompterWindow:
         
         # Instructions label
         instructions = tk.Label(header_frame,
-                               text="LEFT-CLICK word for word confusion | RIGHT-CLICK word for sentence/idea confusion | Cursor tracks current word",
+                               text="C: Toggle Labeling Mode | During Labeling: LEFT-CLICK=word confusion, RIGHT-CLICK=sentence confusion",
                                font=('Arial', 14),
                                fg='#4ECDC4',
                                bg='#1a1a1a')
@@ -128,6 +315,14 @@ class TeleprompterWindow:
                                         fg='#888888',
                                         bg='#1a1a1a')
         self.recording_status.pack(side=tk.LEFT, padx=20, pady=10)
+
+        # Labeling mode status
+        self.labeling_status = tk.Label(status_frame,
+                                       text="📖 READING MODE",
+                                       font=('Arial', 16, 'bold'),
+                                       fg='#96CEB4',
+                                       bg='#1a1a1a')
+        self.labeling_status.pack(side=tk.LEFT, padx=20, pady=10)
         
         self.event_status = tk.Label(status_frame,
                                     text="Events: Word=0, Sentence=0",
@@ -146,7 +341,7 @@ class TeleprompterWindow:
         
         # Navigation hints
         nav_label = tk.Label(status_frame,
-                           text="↑/↓: Scroll | ←/→: Change Text | Space: Start/Stop Recording | +/-: Font Size",
+                           text="↑/↓: Scroll | ←/→: Change Text | Space: Start/Stop Recording | C: Toggle Labeling | +/-: Font Size",
                            font=('Arial', 12),
                            fg='#888888',
                            bg='#1a1a1a')
@@ -183,6 +378,9 @@ class TeleprompterWindow:
         
     def on_left_click(self, event):
         """Handle left click - word confusion"""
+        if not self.labeling_mode:
+            return
+
         if not self.parent.is_recording:
             messagebox.showinfo("Not Recording", "Start recording first before marking confusion events.")
             return
@@ -204,6 +402,9 @@ class TeleprompterWindow:
     
     def on_right_click(self, event):
         """Handle right click - sentence/idea confusion"""
+        if not self.labeling_mode:
+            return
+
         if not self.parent.is_recording:
             messagebox.showinfo("Not Recording", "Start recording first before marking confusion events.")
             return
@@ -307,6 +508,8 @@ class TeleprompterWindow:
             self.update_status()
         elif event.char.lower() == 'q':
             self.on_close()
+        elif event.char.lower() == 'c':
+            self.toggle_labeling_mode()
         elif event.char == '+' or event.char == '=':
             # Increase font size
             current_font = self.text_display.cget('font')
@@ -363,6 +566,41 @@ class TeleprompterWindow:
             pass
         
         self.root.after(100, lambda: self.text_display.config(bg=original_bg))
+
+    def toggle_labeling_mode(self):
+        """Toggle between reading mode and labeling mode"""
+        self.labeling_mode = not self.labeling_mode
+
+        if self.labeling_mode:
+            # Entering labeling mode - stop data collection
+            self.parent.pause_data_collection()
+            self.labeling_status.config(
+                text="🏷️ LABELING MODE",
+                fg='#ff6666'
+            )
+            # Change cursor to indicate clickable mode
+            self.text_display.config(cursor="crosshair")
+            print("\n🏷️ LABELING MODE: Click on confusing words/sentences. Data collection paused.")
+        else:
+            # Exiting labeling mode - resume data collection
+            self.parent.resume_data_collection()
+            self.labeling_status.config(
+                text="📖 READING MODE",
+                fg='#96CEB4'
+            )
+            # Change cursor back to normal
+            self.text_display.config(cursor="hand2")
+            print("\n📖 READING MODE: Data collection resumed. Press 'c' to label again.")
+
+    def pause_data_collection(self):
+        """Pause data collection for labeling mode"""
+        self.data_collection_paused = True
+        print("Data collection paused")
+
+    def resume_data_collection(self):
+        """Resume data collection after labeling mode"""
+        self.data_collection_paused = False
+        print("Data collection resumed")
     
     def scroll_text(self, amount):
         """Scroll the text display smoothly"""
@@ -395,8 +633,11 @@ class TeleprompterWindow:
         """Update recording and event status"""
         if self.parent.is_recording:
             elapsed = time.time() - self.parent.recording_start_time
+            status_text = f"⏺ RECORDING: {elapsed:.1f}s"
+            if self.parent.data_collection_paused:
+                status_text += " (PAUSED)"
             self.recording_status.config(
-                text=f"⏺ RECORDING: {elapsed:.1f}s",
+                text=status_text,
                 fg='#ff4444'
             )
             
@@ -489,6 +730,9 @@ class MuseAthenaVisualizer:
         
         # Current word tracking
         self.current_word = ""
+
+        # Data collection pause state
+        self.data_collection_paused = False
         
         # Color schemes
         self.eeg_colors = {
@@ -648,17 +892,17 @@ class MuseAthenaVisualizer:
                     # Store for recording
                     self.last_eeg_data = args
                     
-                    # Record data if recording - simplified for performance
-                    if self.is_recording:
+                    # Record data if recording and not paused - simplified for performance
+                    if self.is_recording and not self.data_collection_paused:
                         # Only append essential data
                         self.recorded_timestamps.append(timestamp)
                         self.recorded_eeg.append(args)
-                        
+
                         # Append last known values for other channels
                         self.recorded_fnirs.append(self.last_fnirs_data if self.last_fnirs_data else [np.nan] * 8)
                         self.recorded_motion.append(self.last_motion_data if self.last_motion_data else [np.nan] * 6)
                         self.recorded_ref.append(self.last_ref_data if self.last_ref_data else [np.nan] * 2)
-                        
+
                         # Record current word
                         self.recorded_words.append(self.current_word)
                     
@@ -839,9 +1083,10 @@ class MuseAthenaVisualizer:
             print(f"RECORDING STARTED at {datetime.fromtimestamp(self.recording_start_time).strftime('%Y-%m-%d %H:%M:%S')}")
             print(f"{'='*50}")
             print("\n👁 CURSOR TRACKING ACTIVE - Recording words under cursor")
-            print("\n🖱️ CONFUSION MARKERS:")
-            print("  LEFT-CLICK = Word confusion (click the confusing word)")
-            print("  RIGHT-CLICK = Sentence/idea confusion (click any word in the confusing sentence)")
+            print("\n🖱️ CONFUSION LABELING:")
+            print("  Press 'C' to toggle labeling mode")
+            print("  In labeling mode: LEFT-CLICK = word confusion, RIGHT-CLICK = sentence confusion")
+            print("  Data collection pauses during labeling")
             print("  '1', '2', '3' = Other markers (optional)")
             print("\n📖 TEXT NAVIGATION (in teleprompter window):")
             print("  ↑/↓ = Scroll text")
@@ -1430,11 +1675,14 @@ class MuseAthenaVisualizer:
         if self.is_recording:
             y_pos -= 0.06
             elapsed = time.time() - self.recording_start_time
-            self.axes['info'].text(0.1, y_pos, f'⏺ REC: {elapsed:.1f}s', 
+            status_text = f'⏺ REC: {elapsed:.1f}s'
+            if self.data_collection_paused:
+                status_text += ' (PAUSED)'
+            self.axes['info'].text(0.1, y_pos, status_text,
                                  fontsize=10, color='#ff4444', weight='bold',
                                  transform=self.axes['info'].transAxes)
             y_pos -= 0.04
-            self.axes['info'].text(0.1, y_pos, f'Samples: {len(self.recorded_timestamps)}', 
+            self.axes['info'].text(0.1, y_pos, f'Samples: {len(self.recorded_timestamps)}',
                                  fontsize=9, color='#ff6666',
                                  transform=self.axes['info'].transAxes)
             y_pos -= 0.04
@@ -1593,8 +1841,8 @@ class MuseAthenaVisualizer:
         print(f"\n📡 Listening for OSC data on UDP port {self.port}")
         print("\n👁 WORD TRACKING MODE ACTIVE")
         print("\n🖱️ CONFUSION MARKERS (use in teleprompter window):")
-        print("  LEFT-CLICK = Click on the word that confuses you")
-        print("  RIGHT-CLICK = Click on any word in a confusing sentence/idea")
+        print("  C = Toggle labeling mode (pauses data collection)")
+        print("  During labeling: LEFT-CLICK = word confusion, RIGHT-CLICK = sentence confusion")
         print("  '1','2','3' = Optional keyboard markers")
         
         print("\n📖 TELEPROMPTER CONTROLS:")
@@ -1612,10 +1860,10 @@ class MuseAthenaVisualizer:
         print("\n📊 DATA COLLECTION:")
         print("  1. Teleprompter window will open automatically")
         print("  2. Click 'Begin Recording' or press Space to start")
-        print("  3. Read the displayed text carefully")
-        print("  4. LEFT-CLICK directly on words that confuse you")
-        print("  5. RIGHT-CLICK on any word in sentences that are confusing")
-        print("  6. Your cursor position tracks which word you're reading")
+        print("  3. Read the displayed text carefully (data collection active)")
+        print("  4. When done reading, press 'C' to enter labeling mode")
+        print("  5. In labeling mode: LEFT-CLICK words, RIGHT-CLICK sentences that confused you")
+        print("  6. Press 'C' again to exit labeling and resume reading")
         print("  7. Click 'Stop Recording' to save data")
         print("  8. Data auto-saves on exit if recording")
         

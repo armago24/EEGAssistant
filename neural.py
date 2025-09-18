@@ -1,22 +1,7 @@
 #!/usr/bin/env python3
 """
 Neural Network-based Word Confusion Detector for EEG/fNIRS Data
-
-This module implements a deep learning approach for detecting confusion during reading
-using multimodal brain signals (EEG, fNIRS) and motion data.
-
-Key Features:
-- Hybrid architecture combining CNN for raw signals and dense layers for features
-- Multi-scale temporal processing for different signal modalities
-- Attention mechanisms for channel/feature importance
-- Robust handling of class imbalance and small datasets
-- Comprehensive evaluation metrics and visualizations
-- Multi-file training support
-- Command-line interface
-"""
-
-"""
-KEEP IN MIND THAT THIS SYSTEM WILL WORK WITHOUT LOADING THE WORDS THEMSELVES. THEREFORE, I WOULDN'T KNOW
+Fixed version with proper word extraction and complexity features
 """
 
 import numpy as np
@@ -28,6 +13,7 @@ from collections import Counter, defaultdict
 import warnings
 import argparse
 import sys
+import re
 warnings.filterwarnings('ignore')
 
 # Signal processing
@@ -68,17 +54,109 @@ if torch.cuda.is_available():
     cudnn.benchmark = False
 
 
+class WordComplexityAnalyzer:
+    """Analyze word complexity features"""
+    
+    def __init__(self):
+        # Common English digraphs and trigraphs that are difficult
+        self.difficult_patterns = [
+            'ph', 'gh', 'ght', 'tch', 'dge', 'ck', 'kn', 'wr', 
+            'mb', 'sc', 'ps', 'pn', 'rh', 'mn', 'gn', 'tion', 
+            'sion', 'ough', 'augh', 'eigh', 'ieu', 'oux'
+        ]
+        
+        # Medical/technical prefixes and suffixes
+        self.medical_affixes = [
+            'neuro', 'cardio', 'hemo', 'immuno', 'patho', 'physio',
+            'itis', 'osis', 'emia', 'ology', 'ectomy', 'ostomy',
+            'mega', 'micro', 'hyper', 'hypo', 'dys', 'mal'
+        ]
+        
+    def count_syllables(self, word):
+        """Estimate syllable count using a simple algorithm"""
+        word = word.lower()
+        count = 0
+        vowels = 'aeiouy'
+        previous_was_vowel = False
+        
+        for char in word:
+            is_vowel = char in vowels
+            if is_vowel and not previous_was_vowel:
+                count += 1
+            previous_was_vowel = is_vowel
+        
+        # Adjust for silent e
+        if word.endswith('e'):
+            count -= 1
+        if word.endswith('le'):
+            count += 1
+            
+        # Ensure at least one syllable
+        return max(1, count)
+    
+    def analyze_complexity(self, word):
+        """Extract comprehensive complexity features"""
+        word_lower = word.lower()
+        
+        features = {
+            # Basic features
+            'length': len(word),
+            'syllables': self.count_syllables(word),
+            
+            # Character analysis
+            'unique_chars': len(set(word_lower)),
+            'char_variety_ratio': len(set(word_lower)) / len(word) if len(word) > 0 else 0,
+            
+            # Vowel/consonant analysis
+            'vowel_count': sum(1 for c in word_lower if c in 'aeiou'),
+            'consonant_count': sum(1 for c in word_lower if c.isalpha() and c not in 'aeiou'),
+            'vowel_consonant_ratio': 0,  # Will calculate below
+            
+            # Complexity indicators
+            'has_double_letters': int(any(word_lower[i] == word_lower[i+1] 
+                                         for i in range(len(word_lower)-1))),
+            'has_capital': int(any(c.isupper() for c in word)),
+            'difficult_pattern_count': sum(1 for pattern in self.difficult_patterns 
+                                         if pattern in word_lower),
+            'is_medical_term': int(any(affix in word_lower for affix in self.medical_affixes)),
+            
+            # Morphological complexity
+            'prefix_count': 0,  # Simple heuristic
+            'suffix_count': 0,  # Simple heuristic
+            
+            # Readability estimate (simplified)
+            'estimated_grade_level': 0  # Will calculate below
+        }
+        
+        # Calculate vowel/consonant ratio
+        if features['consonant_count'] > 0:
+            features['vowel_consonant_ratio'] = features['vowel_count'] / features['consonant_count']
+        
+        # Simple prefix/suffix detection
+        common_prefixes = ['un', 're', 'pre', 'dis', 'mis', 'over', 'under', 'out']
+        common_suffixes = ['ing', 'ed', 'er', 'est', 'ly', 'ness', 'ment', 'ful', 'less']
+        
+        for prefix in common_prefixes:
+            if word_lower.startswith(prefix) and len(word_lower) > len(prefix) + 2:
+                features['prefix_count'] += 1
+                
+        for suffix in common_suffixes:
+            if word_lower.endswith(suffix) and len(word_lower) > len(suffix) + 2:
+                features['suffix_count'] += 1
+        
+        # Estimate reading grade level (very simplified)
+        # Based on syllables and length
+        features['estimated_grade_level'] = min(12, features['syllables'] * 1.5 + 
+                                               features['length'] * 0.3 + 
+                                               features['difficult_pattern_count'] * 2)
+        
+        return features
+
+
 class EEGDataset(Dataset):
     """PyTorch Dataset for EEG/fNIRS confusion detection"""
     
     def __init__(self, raw_signals, features, labels, augment=False):
-        """
-        Args:
-            raw_signals: Dict with 'eeg', 'fnirs', 'motion' arrays
-            features: Engineered features array
-            labels: Class labels (0=baseline, 1=word_confusion, 2=sentence_confusion)
-            augment: Whether to apply data augmentation
-        """
         self.raw_signals = raw_signals
         self.features = features
         self.labels = labels
@@ -88,31 +166,22 @@ class EEGDataset(Dataset):
         return len(self.labels)
     
     def __getitem__(self, idx):
-        # Get raw signals
         eeg = self.raw_signals['eeg'][idx].copy()
         fnirs = self.raw_signals['fnirs'][idx].copy()
         motion = self.raw_signals['motion'][idx].copy()
-        
-        # Get engineered features
         features = self.features[idx].copy()
-        
-        # Get label
         label = self.labels[idx]
         
-        # Apply augmentation if training
         if self.augment and np.random.rand() > 0.5:
-            # Time shift augmentation
             shift = np.random.randint(-10, 10)
             eeg = np.roll(eeg, shift, axis=1)
             fnirs = np.roll(fnirs, shift, axis=1)
             
-            # Noise augmentation
             if np.random.rand() > 0.5:
                 noise_scale = 0.05
                 eeg += np.random.randn(*eeg.shape) * noise_scale * np.std(eeg)
                 fnirs += np.random.randn(*fnirs.shape) * noise_scale * np.std(fnirs)
             
-            # Channel dropout
             if np.random.rand() > 0.7:
                 dropout_ch = np.random.randint(0, eeg.shape[0])
                 eeg[dropout_ch] *= 0.1
@@ -135,14 +204,9 @@ class ChannelAttention(nn.Module):
         self.fc2 = nn.Linear(n_channels // 2, n_channels)
         
     def forward(self, x):
-        # Global average pooling across time
         avg_pool = torch.mean(x, dim=2)
-        
-        # Attention weights
         attn = F.relu(self.fc1(avg_pool))
         attn = torch.sigmoid(self.fc2(attn))
-        
-        # Apply attention
         return x * attn.unsqueeze(2)
 
 
@@ -170,42 +234,24 @@ class MultiScaleEEGEncoder(nn.Module):
     
     def __init__(self, n_channels=4, n_timepoints=512):
         super().__init__()
-        
-        # Multi-scale convolutional branches
         self.conv_3 = TemporalConvBlock(n_channels, 32, kernel_size=3)
         self.conv_5 = TemporalConvBlock(n_channels, 32, kernel_size=5)
         self.conv_7 = TemporalConvBlock(n_channels, 32, kernel_size=7)
-        
-        # Deeper layers
         self.conv2 = TemporalConvBlock(96, 64, kernel_size=3, stride=2)
         self.conv3 = TemporalConvBlock(64, 128, kernel_size=3, stride=2)
-        
-        # Channel attention
         self.channel_attn = ChannelAttention(n_channels)
-        
-        # Global pooling
         self.global_pool = nn.AdaptiveAvgPool1d(1)
         
     def forward(self, x):
-        # Apply channel attention
         x = self.channel_attn(x)
-        
-        # Multi-scale processing
         x1 = self.conv_3(x)
         x2 = self.conv_5(x)
         x3 = self.conv_7(x)
-        
-        # Concatenate scales
         x = torch.cat([x1, x2, x3], dim=1)
-        
-        # Deeper processing
         x = self.conv2(x)
         x = self.conv3(x)
-        
-        # Global pooling
         x = self.global_pool(x)
         x = x.squeeze(-1)
-        
         return x
 
 
@@ -214,12 +260,9 @@ class fNIRSEncoder(nn.Module):
     
     def __init__(self, n_channels=8, n_timepoints=512):
         super().__init__()
-        
-        # Larger kernels for slower dynamics
         self.conv1 = TemporalConvBlock(n_channels, 16, kernel_size=15)
         self.conv2 = TemporalConvBlock(16, 32, kernel_size=11, stride=2)
         self.conv3 = TemporalConvBlock(32, 64, kernel_size=7, stride=2)
-        
         self.global_pool = nn.AdaptiveAvgPool1d(1)
         
     def forward(self, x):
@@ -238,11 +281,9 @@ class ConfusionDetectorNN(nn.Module):
                  n_features=100, n_classes=3, n_timepoints=512):
         super().__init__()
         
-        # Encoders for each modality
         self.eeg_encoder = MultiScaleEEGEncoder(n_eeg_ch, n_timepoints)
         self.fnirs_encoder = fNIRSEncoder(n_fnirs_ch, n_timepoints)
         
-        # Motion encoder (simple, as it's auxiliary)
         self.motion_encoder = nn.Sequential(
             nn.Conv1d(n_motion_ch, 16, kernel_size=5, stride=2),
             nn.ReLU(),
@@ -250,7 +291,6 @@ class ConfusionDetectorNN(nn.Module):
             nn.Flatten()
         )
         
-        # Feature encoder
         self.feature_encoder = nn.Sequential(
             nn.Linear(n_features, 128),
             nn.BatchNorm1d(128),
@@ -262,10 +302,8 @@ class ConfusionDetectorNN(nn.Module):
             nn.Dropout(0.3)
         )
         
-        # Fusion dimensions
         fusion_dim = 128 + 64 + 16 + 64  # EEG + fNIRS + motion + features
         
-        # Attention-based fusion
         self.fusion_attention = nn.Sequential(
             nn.Linear(fusion_dim, fusion_dim // 2),
             nn.ReLU(),
@@ -273,7 +311,6 @@ class ConfusionDetectorNN(nn.Module):
             nn.Sigmoid()
         )
         
-        # Classification head
         self.classifier = nn.Sequential(
             nn.Linear(fusion_dim, 128),
             nn.BatchNorm1d(128),
@@ -287,20 +324,14 @@ class ConfusionDetectorNN(nn.Module):
         )
         
     def forward(self, eeg, fnirs, motion, features):
-        # Encode each modality
         eeg_feat = self.eeg_encoder(eeg)
         fnirs_feat = self.fnirs_encoder(fnirs)
         motion_feat = self.motion_encoder(motion)
         feat_encoded = self.feature_encoder(features)
         
-        # Concatenate all features
         fused = torch.cat([eeg_feat, fnirs_feat, motion_feat, feat_encoded], dim=1)
-        
-        # Apply attention-based fusion
         attn_weights = self.fusion_attention(fused)
         fused = fused * attn_weights
-        
-        # Classification
         output = self.classifier(fused)
         
         return output, attn_weights
@@ -314,20 +345,17 @@ class WordConfusionDetectorNN:
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print(f"Using device: {self.device}")
         
-        # Initialize components
         self.model = None
         self.scaler = StandardScaler()
         self.label_encoder = LabelEncoder()
+        self.complexity_analyzer = WordComplexityAnalyzer()
         
-        # Signal processing parameters
         self.sample_rate = 256  # Hz for EEG
         self.window_size = 2.0  # seconds
         self.window_samples = int(self.window_size * self.sample_rate)
         
-        # Training history
         self.history = defaultdict(list)
         
-        # Store data from multiple files
         self.all_data = {
             'timestamps': [],
             'eeg_data': [],
@@ -335,8 +363,7 @@ class WordConfusionDetectorNN:
             'motion_data': [],
             'event_timestamps': [],
             'event_types': [],
-            'event_words': [],
-            'tracked_words': []
+            'event_words': []
         }
         
     def load_multiple_files(self, filepaths):
@@ -349,42 +376,26 @@ class WordConfusionDetectorNN:
             print(f"\nProcessing {filepath}...")
             data = np.load(filepath, allow_pickle=True)
             
-            # Get timestamps for this file
             timestamps = data['timestamps']
             
-            # Add time offset to avoid overlapping timestamps
             if len(self.all_data['timestamps']) > 0:
                 cumulative_time_offset = self.all_data['timestamps'][-1][-1] + 10.0
             
-            # Append data with time offset
             self.all_data['timestamps'].append(timestamps + cumulative_time_offset)
             self.all_data['eeg_data'].append(data['eeg'])
             self.all_data['fnirs_data'].append(data['fnirs'])
             self.all_data['motion_data'].append(data['motion'])
             
-            # Append events with time offset
-            self.all_data['event_timestamps'].append(data['event_timestamps'] + cumulative_time_offset)
-            self.all_data['event_types'].append(data['event_types'])
-            self.all_data['event_words'].append(data['event_words'])
-            
-            # Handle words - they might be in different formats
-            if 'words' in data:
-                words = data['words']
-                if len(words) > 0:
-                    # Check if words are already dicts or need to be converted
-                    processed_words = []
-                    for word_entry in words:
-                        if isinstance(word_entry, dict):
-                            # Already a dict, just offset the timestamp
-                            word_copy = word_entry.copy()
-                            if 'timestamp' in word_copy:
-                                word_copy['timestamp'] += cumulative_time_offset
-                            processed_words.append(word_copy)
-                        else:
-                            # Try to extract word info from other formats
-                            # This handles cases where words might be stored differently
-                            pass
-                    self.all_data['tracked_words'].extend(processed_words)
+            # Process events
+            if 'event_timestamps' in data and 'event_types' in data and 'event_words' in data:
+                self.all_data['event_timestamps'].append(data['event_timestamps'] + cumulative_time_offset)
+                self.all_data['event_types'].append(data['event_types'])
+                self.all_data['event_words'].append(data['event_words'])
+            else:
+                print(f"  Warning: No event data found in {filepath}")
+                self.all_data['event_timestamps'].append(np.array([]))
+                self.all_data['event_types'].append(np.array([]))
+                self.all_data['event_words'].append(np.array([]))
             
             print(f"  Loaded {len(timestamps)} samples from {filepath}")
         
@@ -394,34 +405,68 @@ class WordConfusionDetectorNN:
         self.fnirs_data = np.vstack(self.all_data['fnirs_data'])
         self.motion_data = np.vstack(self.all_data['motion_data'])
         
-        self.event_timestamps = np.concatenate(self.all_data['event_timestamps'])
-        self.event_types = np.concatenate(self.all_data['event_types'])
-        self.event_words = np.concatenate(self.all_data['event_words'])
-        
-        self.tracked_words = self.all_data['tracked_words']
+        # Handle potentially empty event arrays
+        event_arrays = [arr for arr in self.all_data['event_timestamps'] if len(arr) > 0]
+        if event_arrays:
+            self.event_timestamps = np.concatenate(event_arrays)
+            self.event_types = np.concatenate([arr for arr in self.all_data['event_types'] if len(arr) > 0])
+            self.event_words = np.concatenate([arr for arr in self.all_data['event_words'] if len(arr) > 0])
+        else:
+            self.event_timestamps = np.array([])
+            self.event_types = np.array([])
+            self.event_words = np.array([])
         
         print(f"\nTotal loaded:")
         print(f"  Samples: {len(self.timestamps)}")
         print(f"  EEG shape: {self.eeg_data.shape}")
         print(f"  fNIRS shape: {self.fnirs_data.shape}")
         print(f"  Events: {len(self.event_timestamps)}")
-        print(f"  Tracked words: {len(self.tracked_words)}")
         
     def create_dataset(self):
-        """Create training dataset with word-level labels"""
-        print("\nCreating dataset...")
+        """Create training dataset from confusion events"""
+        print("\nCreating dataset from confusion events...")
         
-        # Parse confusion events
-        confused_words = set()
-        confusion_map = defaultdict(int)
+        if len(self.event_timestamps) == 0:
+            raise ValueError("No event data found in the loaded files!")
         
-        for i, (ts, event_type, words) in enumerate(zip(
+        # Parse confusion events and extract individual words
+        confusion_events = []
+        for i, (ts, event_type, words_str) in enumerate(zip(
             self.event_timestamps, self.event_types, self.event_words)):
             
-            words_list = words.split() if isinstance(words, str) else [words]
-            for word in words_list:
-                confused_words.add((word.lower(), ts))
-                confusion_map[word.lower()] += 1
+            # Extract individual words from the event
+            if isinstance(words_str, str):
+                # Split multi-word strings
+                words = words_str.split()
+            else:
+                words = [str(words_str)]
+            
+            # Store each word with its confusion context
+            for word in words:
+                confusion_events.append({
+                    'timestamp': ts,
+                    'word': word.lower(),
+                    'event_type': event_type,
+                    'is_sentence': 'sentence' in str(event_type).lower()
+                })
+        
+        print(f"Found {len(confusion_events)} confusion word instances")
+        
+        # Group confusion events by proximity (within 3 seconds)
+        confusion_groups = []
+        current_group = []
+        
+        for event in sorted(confusion_events, key=lambda x: x['timestamp']):
+            if not current_group or event['timestamp'] - current_group[-1]['timestamp'] < 3.0:
+                current_group.append(event)
+            else:
+                if current_group:
+                    confusion_groups.append(current_group)
+                current_group = [event]
+        if current_group:
+            confusion_groups.append(current_group)
+        
+        print(f"Grouped into {len(confusion_groups)} confusion episodes")
         
         # Create samples
         samples = []
@@ -429,166 +474,124 @@ class WordConfusionDetectorNN:
         features = []
         labels = []
         
-        # If we have tracked words, use them
-        if len(self.tracked_words) > 0:
-            print(f"Processing {len(self.tracked_words)} tracked words...")
+        # 1. Create confusion samples
+        for group in confusion_groups:
+            # Use the timestamp of the middle event in the group
+            mid_idx = len(group) // 2
+            center_event = group[mid_idx]
+            ts = center_event['timestamp']
             
-            for word_info in tqdm(self.tracked_words):
-                if isinstance(word_info, dict) and 'timestamp' in word_info:
-                    word_ts = word_info['timestamp']
-                    word_text = word_info.get('text', '').lower()
-                else:
-                    continue
-                
-                # Find closest sample index
-                idx = np.argmin(np.abs(self.timestamps - word_ts))
-                
+            # Find closest sample index
+            idx = np.argmin(np.abs(self.timestamps - ts))
+            
+            # Extract window
+            half_window = self.window_samples // 2
+            start_idx = max(0, idx - half_window)
+            end_idx = min(len(self.timestamps), idx + half_window)
+            
+            if end_idx - start_idx < self.window_samples // 2:
+                continue
+            
+            # Extract signals
+            eeg_win = self.eeg_filtered[start_idx:end_idx].T
+            fnirs_win = self.fnirs_filtered[start_idx:end_idx].T
+            motion_win = self.motion_data[start_idx:end_idx].T
+            
+            # Pad or truncate
+            eeg_win = self._pad_or_truncate(eeg_win, self.window_samples)
+            fnirs_win = self._pad_or_truncate(fnirs_win, self.window_samples)
+            motion_win = self._pad_or_truncate(motion_win, self.window_samples)
+            
+            # Determine label
+            if any(event['is_sentence'] for event in group):
+                label = 2  # sentence confusion
+            else:
+                label = 1  # word confusion
+            
+            # Extract features including word complexity
+            # Use the most complex word in the group
+            word_complexities = []
+            for event in group:
+                complexity = self.complexity_analyzer.analyze_complexity(event['word'])
+                word_complexities.append(complexity)
+            
+            # Select word with highest estimated grade level
+            most_complex_idx = np.argmax([c['estimated_grade_level'] for c in word_complexities])
+            word_features = word_complexities[most_complex_idx]
+            
+            feat_vec = self.extract_features(eeg_win, fnirs_win, word_features)
+            
+            raw_signals['eeg'].append(eeg_win)
+            raw_signals['fnirs'].append(fnirs_win)
+            raw_signals['motion'].append(motion_win)
+            features.append(feat_vec)
+            labels.append(label)
+        
+        # 2. Create baseline samples (non-confusion periods)
+        n_baseline_needed = len(labels) * 2  # 2:1 ratio
+        baseline_added = 0
+        
+        print(f"Creating {n_baseline_needed} baseline samples...")
+        
+        attempts = 0
+        max_attempts = n_baseline_needed * 10
+        
+        while baseline_added < n_baseline_needed and attempts < max_attempts:
+            attempts += 1
+            
+            # Random timestamp
+            random_idx = np.random.randint(self.window_samples, len(self.timestamps) - self.window_samples)
+            random_ts = self.timestamps[random_idx]
+            
+            # Check distance from all confusion events
+            min_dist_to_event = float('inf')
+            for event in confusion_events:
+                min_dist_to_event = min(min_dist_to_event, abs(random_ts - event['timestamp']))
+            
+            # Only use if far from confusion events
+            if min_dist_to_event > 5.0:  # At least 5 seconds away
                 # Extract window
                 half_window = self.window_samples // 2
-                start_idx = max(0, idx - half_window)
-                end_idx = min(len(self.timestamps), idx + half_window)
-                
-                if end_idx - start_idx < self.window_samples // 2:
-                    continue
+                start_idx = random_idx - half_window
+                end_idx = random_idx + half_window
                 
                 # Extract signals
                 eeg_win = self.eeg_filtered[start_idx:end_idx].T
                 fnirs_win = self.fnirs_filtered[start_idx:end_idx].T
                 motion_win = self.motion_data[start_idx:end_idx].T
                 
-                # Pad or truncate to fixed size
-                target_len = self.window_samples
-                eeg_win = self._pad_or_truncate(eeg_win, target_len)
-                fnirs_win = self._pad_or_truncate(fnirs_win, target_len)
-                motion_win = self._pad_or_truncate(motion_win, target_len)
-                
-                # Determine label
-                label = 0  # baseline
-                
-                # Check if word was marked as confusing
-                for conf_word, conf_ts in confused_words:
-                    if abs(word_ts - conf_ts) < 3.0:  # Within 3 seconds
-                        if word_text == conf_word:
-                            # Check event type
-                            event_idx = np.argmin(np.abs(self.event_timestamps - conf_ts))
-                            if 'sentence' in self.event_types[event_idx]:
-                                label = 2  # sentence confusion
-                            else:
-                                label = 1  # word confusion
-                            break
-                
-                # Skip if too close to confusion but not confused (ambiguous)
-                if label == 0:
-                    min_dist_to_confusion = float('inf')
-                    for _, conf_ts in confused_words:
-                        min_dist_to_confusion = min(min_dist_to_confusion, abs(word_ts - conf_ts))
-                    
-                    if min_dist_to_confusion < 3.0:
-                        continue  # Skip ambiguous samples
-                
-                # Extract features
-                word_features = {
-                    'text': word_text,
-                    'previously_confused': int(word_text in confusion_map),
-                    'confusion_count': confusion_map.get(word_text, 0)
-                }
-                
-                feat_vec = self.extract_features(eeg_win, fnirs_win, word_features)
-                
-                # Store
-                raw_signals['eeg'].append(eeg_win)
-                raw_signals['fnirs'].append(fnirs_win)
-                raw_signals['motion'].append(motion_win)
-                features.append(feat_vec)
-                labels.append(label)
-        
-        else:
-            # Fallback: create event-based samples if no word timeline
-            print("No word timeline found. Creating event-based samples...")
-            
-            # Create confusion event samples
-            for i, (event_ts, event_type, event_text) in enumerate(zip(
-                self.event_timestamps, self.event_types, self.event_words)):
-                
-                # Find closest sample index
-                idx = np.argmin(np.abs(self.timestamps - event_ts))
-                
-                # Extract window around event
-                half_window = self.window_samples // 2
-                start_idx = max(0, idx - half_window)
-                end_idx = min(len(self.timestamps), idx + half_window)
-                
-                if end_idx - start_idx < self.window_samples // 2:
-                    continue
-                
-                # Extract signals
-                eeg_win = self.eeg_filtered[start_idx:end_idx].T
-                fnirs_win = self.fnirs_filtered[start_idx:end_idx].T
-                motion_win = self.motion_data[start_idx:end_idx].T
-                
-                # Pad or truncate to fixed size
+                # Pad or truncate
                 eeg_win = self._pad_or_truncate(eeg_win, self.window_samples)
                 fnirs_win = self._pad_or_truncate(fnirs_win, self.window_samples)
                 motion_win = self._pad_or_truncate(motion_win, self.window_samples)
                 
-                # Determine label based on event type
-                if 'sentence' in event_type:
-                    label = 2  # sentence confusion
-                else:
-                    label = 1  # word confusion
+                # Create dummy word features for baseline (average complexity)
+                baseline_word_features = {
+                    'length': 6,
+                    'syllables': 2,
+                    'unique_chars': 5,
+                    'char_variety_ratio': 0.83,
+                    'vowel_count': 2,
+                    'consonant_count': 4,
+                    'vowel_consonant_ratio': 0.5,
+                    'has_double_letters': 0,
+                    'has_capital': 0,
+                    'difficult_pattern_count': 0,
+                    'is_medical_term': 0,
+                    'prefix_count': 0,
+                    'suffix_count': 0,
+                    'estimated_grade_level': 3.0
+                }
                 
-                # Extract features
-                feat_vec = self.extract_features(eeg_win, fnirs_win, None)
+                feat_vec = self.extract_features(eeg_win, fnirs_win, baseline_word_features)
                 
-                # Store
                 raw_signals['eeg'].append(eeg_win)
                 raw_signals['fnirs'].append(fnirs_win)
                 raw_signals['motion'].append(motion_win)
                 features.append(feat_vec)
-                labels.append(label)
-            
-            # Create baseline samples (random windows far from events)
-            n_baseline_needed = len(labels) * 2  # 2:1 ratio
-            baseline_added = 0
-            
-            while baseline_added < n_baseline_needed:
-                # Random timestamp
-                random_idx = np.random.randint(self.window_samples, len(self.timestamps) - self.window_samples)
-                random_ts = self.timestamps[random_idx]
+                labels.append(0)  # baseline
                 
-                # Check distance from all events
-                min_dist_to_event = float('inf')
-                for event_ts in self.event_timestamps:
-                    min_dist_to_event = min(min_dist_to_event, abs(random_ts - event_ts))
-                
-                # Only use if far enough from events
-                if min_dist_to_event > 5.0:  # At least 5 seconds away
-                    # Extract window
-                    half_window = self.window_samples // 2
-                    start_idx = random_idx - half_window
-                    end_idx = random_idx + half_window
-                    
-                    # Extract signals
-                    eeg_win = self.eeg_filtered[start_idx:end_idx].T
-                    fnirs_win = self.fnirs_filtered[start_idx:end_idx].T
-                    motion_win = self.motion_data[start_idx:end_idx].T
-                    
-                    # Pad or truncate to fixed size
-                    eeg_win = self._pad_or_truncate(eeg_win, self.window_samples)
-                    fnirs_win = self._pad_or_truncate(fnirs_win, self.window_samples)
-                    motion_win = self._pad_or_truncate(motion_win, self.window_samples)
-                    
-                    # Extract features
-                    feat_vec = self.extract_features(eeg_win, fnirs_win, None)
-                    
-                    # Store
-                    raw_signals['eeg'].append(eeg_win)
-                    raw_signals['fnirs'].append(fnirs_win)
-                    raw_signals['motion'].append(motion_win)
-                    features.append(feat_vec)
-                    labels.append(0)  # baseline
-                    
-                    baseline_added += 1
+                baseline_added += 1
         
         # Convert to arrays
         for key in raw_signals:
@@ -598,13 +601,14 @@ class WordConfusionDetectorNN:
         
         # Print class distribution
         print(f"\nClass distribution:")
-        for label, count in Counter(labels).items():
-            label_name = ['baseline', 'word_confusion', 'sentence_confusion'][label]
-            print(f"  {label_name}: {count} ({count/len(labels)*100:.1f}%)")
+        label_names = ['baseline', 'word_confusion', 'sentence_confusion']
+        for label_val in range(3):
+            count = np.sum(labels == label_val)
+            if len(labels) > 0:
+                print(f"  {label_names[label_val]}: {count} ({count/len(labels)*100:.1f}%)")
         
         if len(labels) == 0:
-            raise ValueError("No valid samples could be created from the data. "
-                           "Check that the NPZ files contain proper event data.")
+            raise ValueError("No valid samples could be created from the data!")
         
         return raw_signals, features, labels
     
@@ -613,31 +617,26 @@ class WordConfusionDetectorNN:
         print("\nPreprocessing signals...")
         
         # EEG preprocessing
-        # Bandpass filter 0.5-50 Hz
         sos = signal.butter(4, [0.5, 50], btype='band', fs=self.sample_rate, output='sos')
         self.eeg_filtered = signal.sosfiltfilt(sos, self.eeg_data, axis=0)
         
-        # Notch filters for line noise
+        # Notch filters
         for freq in [60, 120]:
             sos_notch = signal.butter(4, [freq-2, freq+2], btype='bandstop', 
                                     fs=self.sample_rate, output='sos')
             self.eeg_filtered = signal.sosfiltfilt(sos_notch, self.eeg_filtered, axis=0)
         
-        # fNIRS preprocessing (only normalized channels)
-        # Low-pass filter at 0.5 Hz for hemodynamic response
-        sos_fnirs = signal.butter(4, 0.5, btype='low', fs=10, output='sos')  # fNIRS is slower
+        # fNIRS preprocessing
         self.fnirs_filtered = self.fnirs_data[:, :4].copy()  # Use normalized channels
-        
-        # Detrend
         self.fnirs_filtered = signal.detrend(self.fnirs_filtered, axis=0)
         
         print("Signal preprocessing complete")
         
-    def extract_features(self, eeg_window, fnirs_window, word_info=None):
-        """Extract hand-crafted features from signal windows"""
+    def extract_features(self, eeg_window, fnirs_window, word_complexity):
+        """Extract features including word complexity"""
         features = []
         
-        # EEG features (per channel)
+        # EEG features
         for ch in range(eeg_window.shape[0]):
             ch_data = eeg_window[ch]
             
@@ -676,20 +675,19 @@ class WordConfusionDetectorNN:
             spectral_entropy = -np.sum(psd_norm * np.log(psd_norm + 1e-15))
             features.append(spectral_entropy)
         
-        # fNIRS features (per channel)
+        # fNIRS features
         for ch in range(fnirs_window.shape[0]):
             ch_data = fnirs_window[ch]
             
             features.extend([
                 np.mean(ch_data),
                 np.std(ch_data),
-                np.max(ch_data) - np.min(ch_data),  # Range
-                np.polyfit(np.arange(len(ch_data)), ch_data, 1)[0],  # Slope
-                np.argmax(ch_data) / len(ch_data)  # Time to peak (normalized)
+                np.max(ch_data) - np.min(ch_data),
+                np.polyfit(np.arange(len(ch_data)), ch_data, 1)[0],
+                np.argmax(ch_data) / len(ch_data)
             ])
         
         # Connectivity features
-        # Frontal asymmetry (AF7 - AF8 alpha power)
         af7_alpha = self._get_band_power(eeg_window[1], 'alpha')
         af8_alpha = self._get_band_power(eeg_window[2], 'alpha')
         features.append(af7_alpha - af8_alpha)
@@ -700,16 +698,27 @@ class WordConfusionDetectorNN:
             coh = self._compute_coherence(eeg_window[ch1], eeg_window[ch2])
             features.append(coh)
         
-        # Word features (if provided)
-        if word_info:
+        # Add word complexity features
+        if isinstance(word_complexity, dict):
             features.extend([
-                len(word_info.get('text', '')),
-                int(any(c.isdigit() for c in word_info.get('text', ''))),
-                word_info.get('previously_confused', 0),
-                word_info.get('confusion_count', 0)
+                word_complexity.get('length', 0),
+                word_complexity.get('syllables', 0),
+                word_complexity.get('unique_chars', 0),
+                word_complexity.get('char_variety_ratio', 0),
+                word_complexity.get('vowel_count', 0),
+                word_complexity.get('consonant_count', 0),
+                word_complexity.get('vowel_consonant_ratio', 0),
+                word_complexity.get('has_double_letters', 0),
+                word_complexity.get('has_capital', 0),
+                word_complexity.get('difficult_pattern_count', 0),
+                word_complexity.get('is_medical_term', 0),
+                word_complexity.get('prefix_count', 0),
+                word_complexity.get('suffix_count', 0),
+                word_complexity.get('estimated_grade_level', 0)
             ])
         else:
-            features.extend([0, 0, 0, 0])
+            # Default values if no word complexity provided
+            features.extend([0] * 14)
         
         return np.array(features)
     
@@ -732,7 +741,6 @@ class WordConfusionDetectorNN:
         """Compute coherence between two signals"""
         f, Cxy = signal.coherence(signal1, signal2, fs=self.sample_rate, 
                                 nperseg=min(64, len(signal1)))
-        # Return mean coherence in alpha band
         alpha_mask = (f >= 8) & (f <= 13)
         return np.mean(Cxy[alpha_mask])
     
@@ -781,7 +789,7 @@ class WordConfusionDetectorNN:
                                            y=labels[train_idx])
         class_weights = torch.FloatTensor(class_weights).to(self.device)
         
-        # Create weighted sampler for balanced training
+        # Create weighted sampler
         train_labels = labels[train_idx]
         sample_weights = np.zeros(len(train_labels))
         for i, label in enumerate(train_labels):
@@ -822,19 +830,16 @@ class WordConfusionDetectorNN:
             train_labels = []
             
             for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{n_epochs} [Train]"):
-                # Move to device
                 eeg = batch['eeg'].to(self.device)
                 fnirs = batch['fnirs'].to(self.device)
                 motion = batch['motion'].to(self.device)
                 feat = batch['features'].to(self.device)
                 labels_batch = batch['label'].to(self.device)
                 
-                # Forward pass
                 optimizer.zero_grad()
                 outputs, _ = self.model(eeg, fnirs, motion, feat)
                 loss = criterion(outputs, labels_batch)
                 
-                # Backward pass
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
                 optimizer.step()
@@ -873,16 +878,13 @@ class WordConfusionDetectorNN:
             train_acc = np.mean(np.array(train_preds) == np.array(train_labels))
             val_acc = np.mean(np.array(val_preds) == np.array(val_labels))
             
-            # Update scheduler
             scheduler.step(val_loss)
             
-            # Save history
             self.history['train_loss'].append(train_loss)
             self.history['val_loss'].append(val_loss)
             self.history['train_acc'].append(train_acc)
             self.history['val_acc'].append(val_acc)
             
-            # Print progress
             print(f"\nEpoch {epoch+1}: "
                   f"Train Loss={train_loss:.4f}, Train Acc={train_acc:.3f}, "
                   f"Val Loss={val_loss:.4f}, Val Acc={val_acc:.3f}")
@@ -891,7 +893,6 @@ class WordConfusionDetectorNN:
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 patience_counter = 0
-                # Save best model
                 torch.save(self.model.state_dict(), f'{self.model_name}_best.pth')
             else:
                 patience_counter += 1
@@ -907,7 +908,6 @@ class WordConfusionDetectorNN:
         print("FINAL MODEL EVALUATION")
         print("="*50)
         
-        # Get final predictions
         self.model.eval()
         all_preds = []
         all_labels = []
@@ -938,10 +938,9 @@ class WordConfusionDetectorNN:
         print(classification_report(all_labels, all_preds, 
                                   target_names=class_names, digits=3))
         
-        # Calculate additional metrics
+        # Calculate metrics
         cm = confusion_matrix(all_labels, all_preds)
         
-        # Per-class accuracy
         print("\nPer-class Performance:")
         for i, class_name in enumerate(class_names):
             class_mask = all_labels == i
@@ -952,7 +951,7 @@ class WordConfusionDetectorNN:
                 print(f"  {class_name}: Acc={class_acc:.3f}, "
                       f"Prec={class_prec:.3f}, Recall={class_recall:.3f}")
         
-        # Confusion detection performance (combining both confusion classes)
+        # Binary confusion detection
         confusion_labels = (all_labels > 0).astype(int)
         confusion_preds = (all_preds > 0).astype(int)
         confusion_probs = all_probs[:, 1] + all_probs[:, 2]
@@ -969,7 +968,7 @@ class WordConfusionDetectorNN:
             auc_score = roc_auc_score(confusion_labels, confusion_probs)
             print(f"  AUC: {auc_score:.3f}")
         except:
-            print("  AUC: Could not calculate (likely single class in data)")
+            print("  AUC: Could not calculate")
         
         return all_preds, all_labels, all_probs
     
@@ -978,7 +977,7 @@ class WordConfusionDetectorNN:
         fig = plt.figure(figsize=(20, 16))
         gs = GridSpec(4, 3, figure=fig, hspace=0.3, wspace=0.3)
         
-        # 1. Training history
+        # Training history
         ax1 = fig.add_subplot(gs[0, :2])
         ax1.plot(self.history['train_loss'], label='Train Loss', linewidth=2)
         ax1.plot(self.history['val_loss'], label='Val Loss', linewidth=2)
@@ -997,7 +996,7 @@ class WordConfusionDetectorNN:
         ax2.legend()
         ax2.grid(True, alpha=0.3)
         
-        # 2. Confusion Matrix
+        # Confusion Matrix
         ax3 = fig.add_subplot(gs[1, 0])
         cm = confusion_matrix(labels, predictions)
         cm_normalized = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
@@ -1010,10 +1009,9 @@ class WordConfusionDetectorNN:
         ax3.set_ylabel('True')
         ax3.set_title('Confusion Matrix', fontsize=14, fontweight='bold')
         
-        # 3. ROC Curves
+        # ROC Curves
         ax4 = fig.add_subplot(gs[1, 1])
         
-        # Binary confusion detection ROC
         confusion_labels = (labels > 0).astype(int)
         confusion_scores = probabilities[:, 1] + probabilities[:, 2]
         
@@ -1025,7 +1023,6 @@ class WordConfusionDetectorNN:
         except:
             pass
         
-        # Multi-class ROC
         for i, class_name in enumerate(['Baseline', 'Word Conf', 'Sentence Conf']):
             try:
                 class_labels = (labels == i).astype(int)
@@ -1044,13 +1041,12 @@ class WordConfusionDetectorNN:
         ax4.legend(loc='lower right')
         ax4.grid(True, alpha=0.3)
         
-        # 4. Class Distribution
+        # Class Distribution
         ax5 = fig.add_subplot(gs[1, 2])
         class_counts = np.bincount(labels)
         bars = ax5.bar(['Baseline', 'Word', 'Sentence'], class_counts, 
                        color=['#2ecc71', '#e74c3c', '#f39c12'])
         
-        # Add value labels
         for bar in bars:
             height = bar.get_height()
             ax5.text(bar.get_x() + bar.get_width()/2., height,
@@ -1060,15 +1056,13 @@ class WordConfusionDetectorNN:
         ax5.set_title('Class Distribution', fontsize=14, fontweight='bold')
         ax5.grid(True, axis='y', alpha=0.3)
         
-        # 5. Prediction Confidence Distribution
+        # Confidence Distribution
         ax6 = fig.add_subplot(gs[2, :])
         
-        # Get confidence scores for predicted classes
         confidence_scores = []
         for i, pred in enumerate(predictions):
             confidence_scores.append(probabilities[i, pred])
         
-        # Plot by true class
         for class_idx, class_name in enumerate(['Baseline', 'Word Confusion', 'Sentence Confusion']):
             mask = labels == class_idx
             if np.sum(mask) > 0:
@@ -1083,14 +1077,12 @@ class WordConfusionDetectorNN:
         ax6.legend()
         ax6.grid(True, alpha=0.3)
         
-        # 6. Performance Metrics Summary
+        # Performance Summary
         ax7 = fig.add_subplot(gs[3, :])
         ax7.axis('off')
         
-        # Calculate metrics
         overall_acc = np.mean(predictions == labels)
         
-        # Per-class metrics
         metrics_text = "PERFORMANCE SUMMARY\n" + "="*50 + "\n\n"
         metrics_text += f"Overall Accuracy: {overall_acc:.3f}\n\n"
         
@@ -1112,7 +1104,6 @@ class WordConfusionDetectorNN:
                 metrics_text += f"  F1-Score: {f1:.3f}\n"
                 metrics_text += f"  Support: {np.sum(class_mask)}\n\n"
         
-        # Binary confusion metrics
         confusion_binary = (labels > 0).astype(int)
         confusion_pred_binary = (predictions > 0).astype(int)
         cm_binary = confusion_matrix(confusion_binary, confusion_pred_binary)
@@ -1130,18 +1121,16 @@ class WordConfusionDetectorNN:
                     fontsize=16, fontweight='bold')
         plt.tight_layout()
         
-        # Save figure
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         plt.savefig(f'{self.model_name}_results_{timestamp}.png', dpi=300, bbox_inches='tight')
         plt.show()
         
     def save_model(self, filepath=None):
-        """Save the complete model package for real-time deployment"""
+        """Save the complete model package"""
         if filepath is None:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             filepath = f'{self.model_name}_{timestamp}.pth'
         
-        # Save complete model package
         model_package = {
             'model_state_dict': self.model.state_dict(),
             'model_config': {
@@ -1154,226 +1143,26 @@ class WordConfusionDetectorNN:
             },
             'scaler': self.scaler,
             'label_encoder': self.label_encoder,
+            'complexity_analyzer': self.complexity_analyzer,
             'history': dict(self.history),
             'sample_rate': self.sample_rate,
             'window_size': self.window_size,
             'metadata': {
                 'training_date': datetime.now().isoformat(),
-                'model_type': 'neural_network',
+                'model_type': 'neural_network_with_complexity',
                 'framework': 'pytorch',
-                'version': '1.0'
+                'version': '2.0'
             }
         }
         
         torch.save(model_package, filepath)
         print(f"\nModel saved to: {filepath}")
-        
-        # Also save as ONNX for deployment
-        onnx_path = filepath.replace('.pth', '.onnx')
-        self.export_onnx(onnx_path)
-        
-        # Save a simplified inference script
-        self.save_inference_script(filepath)
-        
         return filepath
-    
-    def export_onnx(self, filepath):
-        """Export model to ONNX format for deployment"""
-        print(f"Exporting to ONNX format: {filepath}")
-        
-        self.model.eval()
-        
-        # Create dummy inputs
-        dummy_eeg = torch.randn(1, 4, self.window_samples).to(self.device)
-        dummy_fnirs = torch.randn(1, 8, self.window_samples).to(self.device)
-        dummy_motion = torch.randn(1, 6, self.window_samples).to(self.device)
-        dummy_features = torch.randn(1, self.scaler.mean_.shape[0]).to(self.device)
-        
-        # Export
-        torch.onnx.export(
-            self.model,
-            (dummy_eeg, dummy_fnirs, dummy_motion, dummy_features),
-            filepath,
-            input_names=['eeg', 'fnirs', 'motion', 'features'],
-            output_names=['predictions', 'attention_weights'],
-            dynamic_axes={
-                'eeg': {0: 'batch_size'},
-                'fnirs': {0: 'batch_size'},
-                'motion': {0: 'batch_size'},
-                'features': {0: 'batch_size'},
-                'predictions': {0: 'batch_size'},
-                'attention_weights': {0: 'batch_size'}
-            },
-            opset_version=11
-        )
-        
-        print(f"ONNX model exported successfully")
-    
-    def save_inference_script(self, model_path):
-        """Save a simplified script for real-time inference"""
-        inference_code = '''#!/usr/bin/env python3
-"""
-Real-time inference script for EEG/fNIRS confusion detection
-Auto-generated from trained model
-"""
-
-import numpy as np
-import torch
-import torch.nn.functional as F
-from scipy import signal
-from scipy.stats import skew, kurtosis
-
-class RealTimeConfusionDetector:
-    def __init__(self, model_path):
-        # Load model package
-        self.device = torch.device('cpu')  # Use CPU for real-time
-        package = torch.load(model_path, map_location=self.device)
-        
-        # Load components
-        self.model_config = package['model_config']
-        self.scaler = package['scaler']
-        self.sample_rate = package['sample_rate']
-        self.window_size = package['window_size']
-        self.window_samples = int(self.window_size * self.sample_rate)
-        
-        # Recreate and load model
-        from newneuraltrainer import ConfusionDetectorNN
-        self.model = ConfusionDetectorNN(**self.model_config).to(self.device)
-        self.model.load_state_dict(package['model_state_dict'])
-        self.model.eval()
-        
-        # Initialize buffers
-        self.reset_buffers()
-        
-    def reset_buffers(self):
-        """Reset data buffers"""
-        self.eeg_buffer = []
-        self.fnirs_buffer = []
-        self.motion_buffer = []
-        
-    def predict_confusion(self, eeg_data, fnirs_data, motion_data, word_info=None):
-        """
-        Real-time confusion prediction
-        
-        Args:
-            eeg_data: (4, n_samples) EEG data
-            fnirs_data: (8, n_samples) fNIRS data
-            motion_data: (6, n_samples) Motion data
-            word_info: Optional dict with word metadata
-            
-        Returns:
-            confusion_probability: Float between 0-1
-            class_probabilities: [baseline, word_conf, sentence_conf]
-        """
-        # Preprocess signals
-        eeg_processed = self._preprocess_eeg(eeg_data)
-        fnirs_processed = self._preprocess_fnirs(fnirs_data)
-        
-        # Extract features
-        features = self._extract_features(eeg_processed, fnirs_processed, word_info)
-        features_scaled = self.scaler.transform(features.reshape(1, -1))
-        
-        # Prepare tensors
-        eeg_tensor = torch.FloatTensor(eeg_processed).unsqueeze(0)
-        fnirs_tensor = torch.FloatTensor(fnirs_processed).unsqueeze(0)
-        motion_tensor = torch.FloatTensor(motion_data).unsqueeze(0)
-        features_tensor = torch.FloatTensor(features_scaled)
-        
-        # Predict
-        with torch.no_grad():
-            outputs, _ = self.model(eeg_tensor, fnirs_tensor, 
-                                  motion_tensor, features_tensor)
-            probs = F.softmax(outputs, dim=1).numpy()[0]
-        
-        # Calculate confusion probability
-        confusion_prob = probs[1] + probs[2]
-        
-        return confusion_prob, probs
-    
-    def _preprocess_eeg(self, eeg_data):
-        """Preprocess EEG data"""
-        # Bandpass filter
-        sos = signal.butter(4, [0.5, 50], btype='band', 
-                          fs=self.sample_rate, output='sos')
-        filtered = signal.sosfiltfilt(sos, eeg_data, axis=1)
-        
-        # Notch filter
-        for freq in [60, 120]:
-            sos_notch = signal.butter(4, [freq-2, freq+2], btype='bandstop', 
-                                    fs=self.sample_rate, output='sos')
-            filtered = signal.sosfiltfilt(sos_notch, filtered, axis=1)
-        
-        return filtered
-    
-    def _preprocess_fnirs(self, fnirs_data):
-        """Preprocess fNIRS data"""
-        # Use only normalized channels
-        normalized = fnirs_data[:4]
-        
-        # Detrend
-        detrended = signal.detrend(normalized, axis=1)
-        
-        return detrended
-    
-    def _extract_features(self, eeg_data, fnirs_data, word_info):
-        """Extract features matching training pipeline"""
-        # This is a simplified version - implement full feature extraction
-        # matching the training script for production use
-        features = []
-        
-        # Add EEG features
-        for ch in range(eeg_data.shape[0]):
-            features.extend([
-                np.mean(eeg_data[ch]),
-                np.std(eeg_data[ch]),
-                np.max(np.abs(eeg_data[ch])),
-                skew(eeg_data[ch]),
-                kurtosis(eeg_data[ch])
-            ])
-        
-        # Add fNIRS features
-        for ch in range(fnirs_data.shape[0]):
-            features.extend([
-                np.mean(fnirs_data[ch]),
-                np.std(fnirs_data[ch]),
-                np.max(fnirs_data[ch]) - np.min(fnirs_data[ch])
-            ])
-        
-        # Pad to match expected feature count
-        while len(features) < self.scaler.mean_.shape[0]:
-            features.append(0)
-        
-        return np.array(features[:self.scaler.mean_.shape[0]])
-
-# Example usage
-if __name__ == "__main__":
-    detector = RealTimeConfusionDetector("''' + model_path + '''")
-    
-    # Simulate real-time data
-    dummy_eeg = np.random.randn(4, 512)
-    dummy_fnirs = np.random.randn(8, 512)
-    dummy_motion = np.random.randn(6, 512)
-    
-    confusion_prob, class_probs = detector.predict_confusion(
-        dummy_eeg, dummy_fnirs, dummy_motion
-    )
-    
-    print(f"Confusion probability: {confusion_prob:.3f}")
-    print(f"Class probabilities: {class_probs}")
-'''
-        
-        # Save inference script
-        inference_path = model_path.replace('.pth', '_inference.py')
-        with open(inference_path, 'w') as f:
-            f.write(inference_code)
-        
-        print(f"Inference script saved to: {inference_path}")
 
 
 def main():
-    """Main function with command-line interface"""
     parser = argparse.ArgumentParser(
-        description='Train neural network for EEG/fNIRS word confusion detection'
+        description='Train neural network for EEG/fNIRS word confusion detection with complexity features'
     )
     parser.add_argument(
         'data_files',
@@ -1383,29 +1172,28 @@ def main():
     parser.add_argument(
         '--model-name',
         default='confusion_detector_nn',
-        help='Name for the model (default: confusion_detector_nn)'
+        help='Name for the model'
     )
     parser.add_argument(
         '--epochs',
         type=int,
         default=100,
-        help='Number of training epochs (default: 100)'
+        help='Number of training epochs'
     )
     parser.add_argument(
         '--batch-size',
         type=int,
         default=32,
-        help='Batch size for training (default: 32)'
+        help='Batch size for training'
     )
     parser.add_argument(
         '--output-dir',
         default='.',
-        help='Directory to save outputs (default: current directory)'
+        help='Directory to save outputs'
     )
     
     args = parser.parse_args()
     
-    # Validate input files
     data_files = []
     for filepath in args.data_files:
         path = Path(filepath)
@@ -1422,33 +1210,30 @@ def main():
     # Initialize detector
     detector = WordConfusionDetectorNN(model_name=args.model_name)
     
-    # Load all data files
+    # Load data
     detector.load_multiple_files(data_files)
     
-    # Preprocess signals
+    # Preprocess
     detector.preprocess_signals()
     
     # Create dataset
     try:
         raw_signals, features, labels = detector.create_dataset()
     except ValueError as e:
-        print(f"\nError creating dataset: {e}")
-        print("\nPlease ensure your NPZ files contain:")
-        print("  - Proper event data (event_timestamps, event_types, event_words)")
-        print("  - Or word timeline data (words array with timestamp info)")
+        print(f"\nError: {e}")
         sys.exit(1)
     
-    # Train model
+    # Train
     predictions, true_labels, probabilities = detector.train_model(
         raw_signals, features, labels, 
         n_epochs=args.epochs, 
         batch_size=args.batch_size
     )
     
-    # Visualize results
+    # Visualize
     detector.visualize_results(predictions, true_labels, probabilities)
     
-    # Save model
+    # Save
     output_path = Path(args.output_dir)
     output_path.mkdir(exist_ok=True)
     
@@ -1458,8 +1243,6 @@ def main():
     
     print(f"\nTraining complete!")
     print(f"Model saved to: {model_path}")
-    print(f"You can now use the model for real-time inference")
-    print(f"See the generated inference script for usage examples")
 
 
 if __name__ == "__main__":

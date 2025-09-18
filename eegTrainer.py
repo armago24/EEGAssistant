@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Visualizer for Muse S Athena with EEG and fNIRS (optics) data
-Modified for ML training with confusion detection using mouse clicks
-Saves data as NPZ files with event timestamps and clicked words
+Modified for ML training with confusion detection using mouse selection
+Saves data as NPZ files with event timestamps and selected text
 Cursor tracking identifies which word is being read
 """
 
@@ -15,286 +15,104 @@ from collections import deque
 from scipy import signal
 import matplotlib
 try:
-    matplotlib.use('TkAgg')  # Use TkAgg backend for better rendering
+    matplotlib.use('TkAgg')
 except:
-    pass  # Fall back to default backend if TkAgg not available
+    pass
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from matplotlib.gridspec import GridSpec
 from matplotlib.widgets import Button
-import json
 import os
 from datetime import datetime
-from tkinter import filedialog, messagebox
+from tkinter import filedialog
 import tkinter as tk
-from tkinter import font as tkfont
 import signal as sig
 import atexit
 import sys
 
-# Training text with deliberately confusing elements
+# Training texts
 TRAINING_TEXTS = [
-"""
-Abstract
-""",
+"""Epineural cuff electrodes. Epineural cuff electrodes are the simplest of nerve interface designs, usually containing 2 or more electrodes that are insulated and wrap around the surface of the epineurium of the peripheral nerve.""",
 
-"""
-Biohybrid Peripheral Neural Interfaces: Combining Cell Transplantation and Flexible Electronics for Functional Neurological Restoration.
-""",
-
-"""
-Amy Elizabeth Rochford.
-""",
-
-"""
-Peripheral nerve injuries result in a disconnection in the nervous system communication and a consequent loss in neurological function.
-""",
-
-"""
-Currently, there is very limited treatment for these conditions.
-""",
-
-"""
-Neuroprosthetics and cell transplantation are promising approaches to restore lost neurological function: the former aims to bypass the site of injury, connecting directly one part of the nervous system to another (or a prosthetic limb); while the latter aims to repair the injury site.
-""",
-
-"""
-To date, both strategies have shown limited efficacy and lifetime due to several challenges.
-""",
-
-"""
-However, a combinational approach of implantable electronics and stem cell-derived cells for functional neurological restoration could address these issues.
-""",
-
-"""
-The integration between implantable electronics and existing tissue is of paramount importance, this biohybrid strategy with the incorporation of cells may allow for a ‘controllable’ synaptic integration between implanted cells and existing circuitry.
-""",
-
-"""
-Attributes to such a biohybrid implant are: an ability to host and interact with stem-cell derived cells; promotion of organised functional cellular integration with living tissue; and restoration of lost function.
-""",
-
-"""
-Here I report the new design of a biohybrid peripheral nerve multielectrode neural interface device.
-""",
-
-"""
-My devices are fabricated using photolithography and chemical etching techniques to establish a functional electronic device.
-""",
-
-"""
-This multielectrode neural device contains 32 electrodes.
-""",
-
-"""
-Each electrode consisting of planar gold, coated with a conducting polymer (PEDOT:PSS) to decrease the electrode impedance and improve the signal to noise ratio.
-""",
-
-"""
-The layers of Parylene C give a desirable stiffness compatible with that of native nerve.
-""",
-
-"""
-The device hosts iPSC derived myocytes on the electrically active surface, allowing their efficient electrical recording.
-""",
-
-"""
-I have shown survival of human iPSC derived muscle in a rat for up to seven days post implantation in a rat model.
-""",
-
-"""
-I have developed a strong bonded hydrogel that allows for biofabrication on top of flexible electronics.
-""",
-
-"""
-Finally, I showed long term recordings from my biohybrid neural interfaces in a chronic rat peripheral nerve injury model for 30 days duration.
-""",
-
-"""
-4
-""",
-
-"""
-These findings strongly suggest that biohybrid peripheral neural interfaces could be an efficient way to record the peripheral nervous system in a rat peripheral nerve injury model.
-""",
-
-"""
-5
-""",
-
-"""
-Acknowledgements
-""",
-
-"""
-A huge thank you to my Advisor Dr. Damiano Barone who has challenged me at every step of the way and given me support throughout this exciting project and who has gone above and beyond to find collaborators when I have said I’d like certain cell types.
-""",
-
-"""
-I would like to thank my Supervisor, Professor George Malliaras, for the patient guidance, encouragement and advice he has provided throughout this PhD and for creating such a great group ethos and working environment that is a pleasure to work in.
-""",
-
-"""
-Thank you to my mentor Dr. Alexandra Rutz for all her advice related to my project and personal development at graduate school and all-round great support.
-""",
-
-"""
-Thank you to Dr Vincenzo Curto, the master of fabrication for teaching me everything I need to know in the cleanroom.
-""",
-
-"""
-A special thank you to Dr Alejandro Carciner-Lombarde for always being so helpful with any neuroscience question I have, for being such a great role model to me throughout my entire PhD and keeping me sane during long surgery days.
-""",
-
-"""
-Thank you to my fellow PhD lab mates Tanya, Shao-Tuan, Malak, Ben and Elise who have been great friends and have made it a pleasure to go to the lab every day.
-""",
-
-"""
-I would also like to thank my collaborators Dr Mark Kotter and his colleagues at BitBio for their guidance related to OPTI-OX human iPSC derived muscle cells which had been a key part of this thesis and the development of the biohybrid peripheral neural interface.
-""",
-
-"""
-Additionally, my collaborators Dr Ivo Lieberam and Dr Ieva Berzaskyte for all their help and guidance with motor neuron cell culture.
-""",
-
-"""
-I am grateful to the Engineering and Physical Sciences Research Council for providing me with the funding necessary to undertake this PhD project.
-""",
-
-"""
-I would also like to thank all the friends I met at Kings College, including Priti, Solveig and Carly who have endured the stories of a mad scientist for some time now.
-""",
-
-"""
-A huge thanks to my tutor Professor Francesco Colucci for some enjoyable walks around Kings and great book recommendations.
-""",
-
-"""
-Thank you to all the women I have played Lacrosse with at CUWLC for the past three years, who honoured me with my university blues.
-""",
-
-"""
-Thank you to my Cambridge friends and my sister Phoebe that stuck it out with me in Cambridge during the pandemic in 2020.
-""",
-
-"""
-Thank you for all the cold walks, the socially
-""",
-
-"""
-6
-""",
-
-"""
-distanced picnics, the yoga in the park, cycle rides, vegetable growing, pints from the snug window (Free Press) and the list goes on.
-""",
-
-"""
-These are the things that kept me sane in a world that appeared to stand still for some time.
-""",
-
-"""
-Finally, I would like to thank my Family.
-""",
-
-"""
-My Grandparents, Parents and Sisters for the endless support they have given me throughout this PhD.
-""",
-
-"""
-They have always been there to celebrate the cell survival successes and picked up the phone when things have been hard.
-""",
-
-"""
-I would not be here without them and owe them a world of gratitude.
-""",
-
-"""
-The real MVP of my entire PhD is Hugo.
-""",
-
-"""
-Thank you for the day in, day out listening to my crazy scientific ideas and always telling me to “go for it!”
-""",
-
-"""
-Thank you for always being there for me when times have been hard, especially during the pandemic.
-""",
-
-"""
-A special mention to our cat Newton who has made our Cambridge life that bit more special and entertaining.
-""",
+"""To date this type of interface is the only used in the clinic. This approach elicits a low FBR, making them quite stable for chronic implantation because the technology relies on compound signals to and from the nerve.""",
 ]
 
 class TeleprompterWindow:
-    """Separate window for displaying text in large format with click-based confusion marking"""
+    """Teleprompter window with improved text selection for confusion marking"""
     def __init__(self, parent_visualizer):
         self.parent = parent_visualizer
         self.root = tk.Tk()
         self.root.title("👁 READING MATERIAL - Confusion Detection Training")
         
-        # Make window large
+        # Window setup
         self.root.geometry("1200x800")
         self.root.configure(bg='#0a0a0a')
-        
-        # Track if window is active
         self.active = True
-
-        # Labeling mode state
         self.labeling_mode = False
         
-        # Cursor tracking variables
+        # Selection tracking
+        self.selection_start = None
+        self.selection_end = None
+        self.is_dragging = False
+        
+        # Cursor tracking
         self.current_word = ""
-        self.current_word_index = ""
-        self.cursor_update_interval = 50  # milliseconds
+        self.cursor_update_interval = 50
         self.last_cursor_update = 0
         
-        # Header frame
+        # UI Setup
+        self._setup_ui()
+        
+        # Bind events
+        self._bind_events()
+        
+        # Initialize display
+        self.update_display()
+        self.track_cursor()
+    
+    def _setup_ui(self):
+        """Setup the UI components"""
+        # Header
         header_frame = tk.Frame(self.root, bg='#1a1a1a', height=80)
         header_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
         header_frame.pack_propagate(False)
         
-        # Title label
-        title_label = tk.Label(header_frame, 
-                               text="👁 CONFUSION DETECTION TRAINING",
-                               font=('Arial', 24, 'bold'),
-                               fg='#FFD93D',
-                               bg='#1a1a1a')
-        title_label.pack(pady=10)
+        tk.Label(header_frame, 
+                text="👁 CONFUSION DETECTION TRAINING",
+                font=('Arial', 24, 'bold'),
+                fg='#FFD93D',
+                bg='#1a1a1a').pack(pady=10)
         
-        # Instructions label
-        instructions = tk.Label(header_frame,
-                               text="C: Toggle Labeling Mode | During Labeling: LEFT-CLICK=word confusion, RIGHT-CLICK=sentence confusion",
-                               font=('Arial', 14),
-                               fg='#4ECDC4',
-                               bg='#1a1a1a')
-        instructions.pack()
+        tk.Label(header_frame,
+                text="C: Toggle Labeling | LEFT-DRAG: multi-word confusion | RIGHT-CLICK: sentence confusion",
+                font=('Arial', 14),
+                fg='#4ECDC4',
+                bg='#1a1a1a').pack()
         
-        # Main text frame
+        # Text display
         text_frame = tk.Frame(self.root, bg='#0a0a0a')
         text_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
         
-        # Text display with scrollbar
         self.text_display = tk.Text(text_frame,
-                                    font=('Georgia', 28, 'normal'),
-                                    bg='#0a0a0a',
-                                    fg='white',
-                                    wrap=tk.WORD,
-                                    padx=40,
-                                    pady=30,
-                                    spacing1=10,  # Space before each line
-                                    spacing2=8,   # Space between wrapped lines
-                                    spacing3=10,  # Space after each line
-                                    insertwidth=0,  # Hide cursor
-                                    highlightthickness=0,
-                                    borderwidth=0,
-                                    relief=tk.FLAT,
-                                    cursor="hand2")  # Show hand cursor
+                                   font=('Georgia', 28, 'normal'),
+                                   bg='#0a0a0a',
+                                   fg='white',
+                                   wrap=tk.WORD,
+                                   padx=40,
+                                   pady=30,
+                                   spacing1=10,
+                                   spacing2=8,
+                                   spacing3=10,
+                                   insertwidth=0,
+                                   highlightthickness=0,
+                                   borderwidth=0,
+                                   relief=tk.FLAT,
+                                   cursor="hand2")
         self.text_display.pack(fill=tk.BOTH, expand=True)
-        
-        # Make text read-only
         self.text_display.config(state=tk.DISABLED)
+        
+        # Configure selection colors
+        self.text_display.tag_configure("selection", background="#4444ff", foreground="white")
         
         # Status frame
         status_frame = tk.Frame(self.root, bg='#1a1a1a', height=120)
@@ -315,8 +133,7 @@ class TeleprompterWindow:
                                         fg='#888888',
                                         bg='#1a1a1a')
         self.recording_status.pack(side=tk.LEFT, padx=20, pady=10)
-
-        # Labeling mode status
+        
         self.labeling_status = tk.Label(status_frame,
                                        text="📖 READING MODE",
                                        font=('Arial', 16, 'bold'),
@@ -331,7 +148,7 @@ class TeleprompterWindow:
                                     bg='#1a1a1a')
         self.event_status.pack(side=tk.LEFT, padx=20, pady=10)
         
-        # Current word label
+        # Additional status
         self.word_status = tk.Label(status_frame,
                                    text="Current word: -",
                                    font=('Arial', 14, 'italic'),
@@ -339,295 +156,231 @@ class TeleprompterWindow:
                                    bg='#1a1a1a')
         self.word_status.pack(side=tk.RIGHT, padx=20, pady=5)
         
-        # Navigation hints
-        nav_label = tk.Label(status_frame,
-                           text="↑/↓: Scroll | ←/→: Change Text | Space: Start/Stop Recording | C: Toggle Labeling | +/-: Font Size",
-                           font=('Arial', 12),
-                           fg='#888888',
-                           bg='#1a1a1a')
-        nav_label.pack(side=tk.BOTTOM, padx=20, pady=5)
+        tk.Label(status_frame,
+                text="↑/↓: Scroll | ←/→: Change Text | Space: Record | C: Toggle Label | +/-: Font",
+                font=('Arial', 12),
+                fg='#888888',
+                bg='#1a1a1a').pack(side=tk.BOTTOM, padx=20, pady=5)
         
-        # Last clicked word info
         self.last_click_label = tk.Label(status_frame,
-                                       text="Last clicked: -",
+                                       text="Last marked: -",
                                        font=('Arial', 12),
                                        fg='#FF6B6B',
                                        bg='#1a1a1a')
         self.last_click_label.pack(side=tk.BOTTOM, padx=20, pady=2)
-        
-        # Bind keyboard events
+    
+    def _bind_events(self):
+        """Bind all event handlers"""
         self.root.bind('<Key>', self.on_key_press)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         
-        # Bind mouse events
+        # Mouse events
         self.text_display.bind('<Motion>', self.on_mouse_motion)
         self.text_display.bind('<Leave>', self.on_mouse_leave)
-        self.text_display.bind('<Button-1>', self.on_left_click)  # Left click
-        self.text_display.bind('<Button-3>', self.on_right_click)  # Right click
-        # Also bind Button-2 for middle click on some systems
-        self.text_display.bind('<Button-2>', self.on_right_click)  # Middle click as right click alternative
-        
-        # Position tracking for smooth scrolling
-        self.scroll_position = 0.0
-        
-        # Update the display
-        self.update_display()
-        
-        # Start cursor tracking loop
-        self.track_cursor()
-        
-    def on_left_click(self, event):
-        """Handle left click - word confusion"""
+        self.text_display.bind('<Button-1>', self.on_left_down)
+        self.text_display.bind('<B1-Motion>', self.on_left_drag)
+        self.text_display.bind('<ButtonRelease-1>', self.on_left_up)
+        self.text_display.bind('<Button-3>', self.on_right_click)
+        self.text_display.bind('<Button-2>', self.on_right_click)
+    
+    def on_left_down(self, event):
+        """Start text selection on left mouse down"""
         if not self.labeling_mode:
             return
-
-        if not self.parent.is_recording:
-            messagebox.showinfo("Not Recording", "Start recording first before marking confusion events.")
+            
+        self.is_dragging = True
+        self.selection_start = self.text_display.index(f"@{event.x},{event.y}")
+        self.selection_end = self.selection_start
+        
+        # Clear existing selection
+        self.text_display.tag_remove("selection", "1.0", tk.END)
+    
+    def on_left_drag(self, event):
+        """Update selection during drag"""
+        if not self.is_dragging or not self.labeling_mode:
             return
             
-        # Get the word at click position
-        try:
-            index = self.text_display.index(f"@{event.x},{event.y}")
-            word_start = self.text_display.index(f"{index} wordstart")
-            word_end = self.text_display.index(f"{index} wordend")
-            clicked_word = self.text_display.get(word_start, word_end).strip()
+        # Update selection end point
+        self.selection_end = self.text_display.index(f"@{event.x},{event.y}")
+        
+        # Update visual selection
+        self.text_display.tag_remove("selection", "1.0", tk.END)
+        self.text_display.tag_add("selection", self.selection_start, self.selection_end)
+    
+    def on_left_up(self, event):
+        """Complete selection on mouse up"""
+        if not self.is_dragging or not self.labeling_mode:
+            return
             
-            if clicked_word:
-                # Record the event with the specific word
-                self.parent.record_event('word_confusion', clicked_word)
-                self.flash_event("WORD", clicked_word)
-                self.last_click_label.config(text=f"Last clicked: '{clicked_word}' (word confusion)")
+        self.is_dragging = False
+        
+        if not self.parent.is_recording:
+            self.text_display.tag_remove("selection", "1.0", tk.END)
+            tk.messagebox.showinfo("Not Recording", "Start recording first before marking confusion events.")
+            return
+        
+        # Get selected text
+        try:
+            if self.text_display.compare(self.selection_start, "<", self.selection_end):
+                start = self.selection_start
+                end = self.selection_end
+            else:
+                start = self.selection_end
+                end = self.selection_start
+            
+            selected_text = self.text_display.get(start, end).strip()
+            
+            if selected_text:
+                # Record the confusion event
+                self.parent.record_event('word_confusion', selected_text)
+                self.flash_event("WORD", selected_text)
+                self.last_click_label.config(text=f"Last marked: '{selected_text[:30]}...' (word confusion)")
+                
+                # Clear selection after brief delay
+                self.root.after(500, lambda: self.text_display.tag_remove("selection", "1.0", tk.END))
         except Exception as e:
-            print(f"Error getting clicked word: {e}")
+            print(f"Error processing selection: {e}")
     
     def on_right_click(self, event):
-        """Handle right click - sentence/idea confusion"""
+        """Handle right click for sentence confusion"""
         if not self.labeling_mode:
             return
-
+        
         if not self.parent.is_recording:
-            messagebox.showinfo("Not Recording", "Start recording first before marking confusion events.")
+            tk.messagebox.showinfo("Not Recording", "Start recording first before marking confusion events.")
             return
-            
-        # Get the word at click position (as reference point for the confusing sentence)
+        
         try:
-            index = self.text_display.index(f"@{event.x},{event.y}")
-            word_start = self.text_display.index(f"{index} wordstart")
-            word_end = self.text_display.index(f"{index} wordend")
-            clicked_word = self.text_display.get(word_start, word_end).strip()
+            # Get click position
+            click_pos = self.text_display.index(f"@{event.x},{event.y}")
             
-            if clicked_word:
-                # Record the event with the specific word as reference
-                self.parent.record_event('sentence_confusion', clicked_word)
-                self.flash_event("SENTENCE", clicked_word)
-                self.last_click_label.config(text=f"Last clicked: '{clicked_word}' (sentence confusion)")
+            # Get entire text
+            text_content = self.text_display.get("1.0", tk.END)
+            
+            # Find sentence boundaries
+            click_offset = len(self.text_display.get("1.0", click_pos))
+            
+            # Find previous period or start
+            prev_period = text_content.rfind('.', 0, click_offset)
+            if prev_period == -1:
+                prev_period = 0
+            else:
+                prev_period += 1  # Start after the period
+            
+            # Find next period or end
+            next_period = text_content.find('.', click_offset)
+            if next_period == -1:
+                next_period = len(text_content) - 1
+            else:
+                next_period += 1  # Include the period
+            
+            # Extract sentence
+            sentence = text_content[prev_period:next_period].strip()
+            
+            if sentence:
+                # Record the event
+                self.parent.record_event('sentence_confusion', sentence)
+                self.flash_event("SENTENCE", sentence)
+                self.last_click_label.config(text=f"Last marked: '{sentence[:30]}...' (sentence confusion)")
         except Exception as e:
-            print(f"Error getting clicked word: {e}")
+            print(f"Error processing sentence: {e}")
     
     def on_mouse_motion(self, event):
-        """Track mouse movement over text"""
-        current_time = time.time() * 1000  # milliseconds
+        """Track cursor position over text"""
+        current_time = time.time() * 1000
         
-        # Throttle updates to avoid excessive processing
         if current_time - self.last_cursor_update < self.cursor_update_interval:
             return
-            
+        
         self.last_cursor_update = current_time
         
-        # Get the index at the mouse position
         try:
             index = self.text_display.index(f"@{event.x},{event.y}")
-            
-            # Get word boundaries at this position
             word_start = self.text_display.index(f"{index} wordstart")
             word_end = self.text_display.index(f"{index} wordend")
-            
-            # Extract the word
             word = self.text_display.get(word_start, word_end).strip()
             
             if word and word != self.current_word:
                 self.current_word = word
-                self.current_word_index = word_start
                 self.word_status.config(text=f"Current word: {word}")
-                
-                # Update parent's current word
                 self.parent.current_word = word
-                
-        except Exception as e:
-            # Ignore errors from invalid positions
+        except:
             pass
     
     def on_mouse_leave(self, event):
-        """Handle mouse leaving the text area"""
+        """Handle mouse leaving text area"""
         self.current_word = ""
-        self.current_word_index = ""
         self.parent.current_word = ""
         self.word_status.config(text="Current word: -")
     
-    def track_cursor(self):
-        """Regular tracking of cursor position for recording"""
-        if self.active:
-            # Get current cursor position relative to text widget
-            try:
-                x, y = self.text_display.winfo_pointerxy()
-                widget_x = self.text_display.winfo_rootx()
-                widget_y = self.text_display.winfo_rooty()
-                
-                # Calculate relative position
-                rel_x = x - widget_x
-                rel_y = y - widget_y
-                
-                # Check if cursor is within text widget bounds
-                if (0 <= rel_x <= self.text_display.winfo_width() and 
-                    0 <= rel_y <= self.text_display.winfo_height()):
-                    
-                    # Trigger motion event processing
-                    event = type('obj', (object,), {'x': rel_x, 'y': rel_y})
-                    self.on_mouse_motion(event)
-                
-            except:
-                pass
-            
-            # Schedule next update
-            self.root.after(50, self.track_cursor)
-    
     def on_key_press(self, event):
-        """Handle keyboard events in teleprompter window"""
-        if event.keysym == 'Up':
-            self.scroll_text(-0.05)
-        elif event.keysym == 'Down':
-            self.scroll_text(0.05)
-        elif event.keysym == 'Left':
-            self.parent.previous_text()
-            self.update_display()
-        elif event.keysym == 'Right':
-            self.parent.next_text()
-            self.update_display()
-        elif event.keysym == 'space':
-            self.parent.toggle_recording()
-            self.update_status()
+        """Handle keyboard events"""
+        key_actions = {
+            'Up': lambda: self.scroll_text(-0.05),
+            'Down': lambda: self.scroll_text(0.05),
+            'Left': lambda: (self.parent.previous_text(), self.update_display()),
+            'Right': lambda: (self.parent.next_text(), self.update_display()),
+            'space': lambda: (self.parent.toggle_recording(), self.update_status()),
+        }
+        
+        if event.keysym in key_actions:
+            key_actions[event.keysym]()
         elif event.char.lower() == 'q':
             self.on_close()
         elif event.char.lower() == 'c':
             self.toggle_labeling_mode()
-        elif event.char == '+' or event.char == '=':
-            # Increase font size
-            current_font = self.text_display.cget('font')
-            if isinstance(current_font, str):
-                font_parts = current_font.split()
-                current_size = int(font_parts[1]) if len(font_parts) > 1 else 28
-            else:
-                current_size = 28
-            new_size = min(current_size + 2, 48)
-            self.text_display.config(font=('Georgia', new_size, 'normal'))
+        elif event.char in ['+', '=']:
+            self.adjust_font_size(2)
         elif event.char == '-':
-            # Decrease font size
-            current_font = self.text_display.cget('font')
-            if isinstance(current_font, str):
-                font_parts = current_font.split()
-                current_size = int(font_parts[1]) if len(font_parts) > 1 else 28
-            else:
-                current_size = 28
-            new_size = max(current_size - 2, 16)
-            self.text_display.config(font=('Georgia', new_size, 'normal'))
-        # Legacy keyboard shortcuts (optional - can be removed)
-        elif event.char == '1':
-            self.parent.record_event('marker_1', self.current_word)
-        elif event.char == '2':
-            self.parent.record_event('marker_2', self.current_word)
-        elif event.char == '3':
-            self.parent.record_event('marker_3', self.current_word)
+            self.adjust_font_size(-2)
     
-    def flash_event(self, event_type, word):
-        """Flash the screen briefly to indicate event recorded"""
+    def adjust_font_size(self, delta):
+        """Adjust text display font size"""
+        current_font = self.text_display.cget('font')
+        if isinstance(current_font, str):
+            font_parts = current_font.split()
+            current_size = int(font_parts[1]) if len(font_parts) > 1 else 28
+        else:
+            current_size = 28
+        new_size = max(16, min(current_size + delta, 48))
+        self.text_display.config(font=('Georgia', new_size, 'normal'))
+    
+    def flash_event(self, event_type, text):
+        """Visual feedback for event recording"""
         original_bg = self.text_display.cget('bg')
         flash_color = '#2a2a2a' if event_type == "WORD" else '#1a2a2a'
         self.text_display.config(bg=flash_color)
-        
-        # Also highlight the clicked word briefly
-        try:
-            # Find all occurrences of the word
-            start_pos = '1.0'
-            while True:
-                pos = self.text_display.search(word, start_pos, tk.END)
-                if not pos:
-                    break
-                end_pos = f"{pos}+{len(word)}c"
-                self.text_display.tag_add('highlight', pos, end_pos)
-                start_pos = end_pos
-            
-            # Configure highlight tag
-            highlight_color = '#ff6666' if event_type == "WORD" else '#6666ff'
-            self.text_display.tag_config('highlight', background=highlight_color)
-            
-            # Remove highlight after delay
-            self.root.after(200, lambda: self.text_display.tag_remove('highlight', '1.0', tk.END))
-        except:
-            pass
-        
         self.root.after(100, lambda: self.text_display.config(bg=original_bg))
-
+    
     def toggle_labeling_mode(self):
-        """Toggle between reading mode and labeling mode"""
+        """Toggle between reading and labeling modes"""
         self.labeling_mode = not self.labeling_mode
-
+        
         if self.labeling_mode:
-            # Entering labeling mode - stop data collection
             self.parent.pause_data_collection()
-            self.labeling_status.config(
-                text="🏷️ LABELING MODE",
-                fg='#ff6666'
-            )
-            # Change cursor to indicate clickable mode
+            self.labeling_status.config(text="🏷️ LABELING MODE", fg='#ff6666')
             self.text_display.config(cursor="crosshair")
-            print("\n🏷️ LABELING MODE: Click on confusing words/sentences. Data collection paused.")
+            print("\n🏷️ LABELING MODE: Click and drag to select confusing text.")
         else:
-            # Exiting labeling mode - resume data collection
             self.parent.resume_data_collection()
-            self.labeling_status.config(
-                text="📖 READING MODE",
-                fg='#96CEB4'
-            )
-            # Change cursor back to normal
+            self.labeling_status.config(text="📖 READING MODE", fg='#96CEB4')
             self.text_display.config(cursor="hand2")
-            print("\n📖 READING MODE: Data collection resumed. Press 'c' to label again.")
-
-    def pause_data_collection(self):
-        """Pause data collection for labeling mode"""
-        self.data_collection_paused = True
-        print("Data collection paused")
-
-    def resume_data_collection(self):
-        """Resume data collection after labeling mode"""
-        self.data_collection_paused = False
-        print("Data collection resumed")
+            self.text_display.tag_remove("selection", "1.0", tk.END)
+            print("\n📖 READING MODE: Data collection resumed.")
     
     def scroll_text(self, amount):
-        """Scroll the text display smoothly"""
+        """Scroll the text display"""
         self.text_display.yview_scroll(int(amount * 10), "units")
     
     def update_display(self):
-        """Update the text display with current text"""
+        """Update text display with current passage"""
         self.text_display.config(state=tk.NORMAL)
         self.text_display.delete('1.0', tk.END)
-        
-        # Get current text
-        current_text = TRAINING_TEXTS[self.parent.current_text_index]
-        
-        # Insert text with some formatting
-        self.text_display.insert('1.0', current_text)
-        
-        # Make read-only again
+        self.text_display.insert('1.0', TRAINING_TEXTS[self.parent.current_text_index])
         self.text_display.config(state=tk.DISABLED)
-        
-        # Reset scroll position
         self.text_display.yview_moveto(0)
-        
-        # Update status
         self.text_status.config(text=f"Text: {self.parent.current_text_index + 1}/{len(TRAINING_TEXTS)}")
-        
-        # Clear last clicked label
-        self.last_click_label.config(text="Last clicked: -")
+        self.last_click_label.config(text="Last marked: -")
     
     def update_status(self):
         """Update recording and event status"""
@@ -636,10 +389,7 @@ class TeleprompterWindow:
             status_text = f"⏺ RECORDING: {elapsed:.1f}s"
             if self.parent.data_collection_paused:
                 status_text += " (PAUSED)"
-            self.recording_status.config(
-                text=status_text,
-                fg='#ff4444'
-            )
+            self.recording_status.config(text=status_text, fg='#ff4444')
             
             # Count events
             word_count = sum(1 for _, event_type, _ in self.parent.recorded_events 
@@ -647,29 +397,44 @@ class TeleprompterWindow:
             sentence_count = sum(1 for _, event_type, _ in self.parent.recorded_events 
                               if event_type == 'sentence_confusion')
             
-            self.event_status.config(
-                text=f"Events: Word={word_count}, Sentence={sentence_count}"
-            )
+            self.event_status.config(text=f"Events: Word={word_count}, Sentence={sentence_count}")
         else:
-            self.recording_status.config(
-                text="⏺ NOT RECORDING",
-                fg='#888888'
-            )
+            self.recording_status.config(text="⏺ NOT RECORDING", fg='#888888')
+    
+    def track_cursor(self):
+        """Track cursor position for word recording"""
+        if self.active:
+            try:
+                x, y = self.text_display.winfo_pointerxy()
+                widget_x = self.text_display.winfo_rootx()
+                widget_y = self.text_display.winfo_rooty()
+                rel_x = x - widget_x
+                rel_y = y - widget_y
+                
+                if (0 <= rel_x <= self.text_display.winfo_width() and 
+                    0 <= rel_y <= self.text_display.winfo_height()):
+                    event = type('obj', (object,), {'x': rel_x, 'y': rel_y})
+                    self.on_mouse_motion(event)
+            except:
+                pass
+            
+            self.root.after(50, self.track_cursor)
     
     def on_close(self):
-        """Handle window close"""
+        """Clean window close"""
         self.active = False
         self.root.destroy()
     
     def update_loop(self):
-        """Regular update loop for status"""
+        """Regular status update loop"""
         if self.active:
             self.update_status()
             self.root.after(100, self.update_loop)
 
+
 class MuseAthenaVisualizer:
     def __init__(self, port=8052, buffer_size=2000, window_duration=10):
-        # Network settings
+        # Network
         self.port = port
         self.socket = None
         self.running = False
@@ -679,39 +444,14 @@ class MuseAthenaVisualizer:
         self.window_duration = window_duration
         self.timestamps = deque(maxlen=buffer_size)
         
-        # Channel data storage - 4 EEG channels for Athena
-        self.eeg_channels = {
-            'TP9': deque(maxlen=buffer_size),
-            'AF7': deque(maxlen=buffer_size),
-            'AF8': deque(maxlen=buffer_size),
-            'TP10': deque(maxlen=buffer_size)
-        }
-        
-        # fNIRS/Optics channels - 8 values
-        self.fnirs_channels = {
-            'Ch1_norm': deque(maxlen=buffer_size),
-            'Ch2_norm': deque(maxlen=buffer_size),
-            'Ch3_norm': deque(maxlen=buffer_size),
-            'Ch4_norm': deque(maxlen=buffer_size),
-            'Ch1_raw': deque(maxlen=buffer_size),
-            'Ch2_raw': deque(maxlen=buffer_size),
-            'Ch3_raw': deque(maxlen=buffer_size),
-            'Ch4_raw': deque(maxlen=buffer_size)
-        }
-        
-        self.motion_channels = {
-            'acc_x': deque(maxlen=buffer_size),
-            'acc_y': deque(maxlen=buffer_size),
-            'acc_z': deque(maxlen=buffer_size),
-            'gyro_x': deque(maxlen=buffer_size),
-            'gyro_y': deque(maxlen=buffer_size),
-            'gyro_z': deque(maxlen=buffer_size)
-        }
-        
-        self.ref_channels = {
-            'DRL': deque(maxlen=buffer_size),
-            'REF': deque(maxlen=buffer_size)
-        }
+        # Channel storage
+        self.eeg_channels = {ch: deque(maxlen=buffer_size) 
+                            for ch in ['TP9', 'AF7', 'AF8', 'TP10']}
+        self.fnirs_channels = {f'Ch{i}_{t}': deque(maxlen=buffer_size) 
+                              for i in range(1,5) for t in ['norm', 'raw']}
+        self.motion_channels = {ch: deque(maxlen=buffer_size) 
+                               for ch in ['acc_x', 'acc_y', 'acc_z', 'gyro_x', 'gyro_y', 'gyro_z']}
+        self.ref_channels = {ch: deque(maxlen=buffer_size) for ch in ['DRL', 'REF']}
         
         # Thread safety
         self.lock = threading.Lock()
@@ -722,36 +462,44 @@ class MuseAthenaVisualizer:
         self.lines = {}
         self.spectral_lines = {}
         
-        # Teleprompter window
+        # UI elements
         self.teleprompter = None
-        
-        # Text navigation for training
         self.current_text_index = 0
-        
-        # Current word tracking
         self.current_word = ""
-
-        # Data collection pause state
         self.data_collection_paused = False
         
-        # Color schemes
-        self.eeg_colors = {
-            'TP9': '#FF6B6B',
-            'AF7': '#4ECDC4',
-            'AF8': '#45B7D1',
-            'TP10': '#96CEB4'
-        }
+        # Recording
+        self.is_recording = False
+        self.recording_start_time = None
+        self.record_button = None
+        self.recorded_timestamps = []
+        self.recorded_eeg = []
+        self.recorded_fnirs = []
+        self.recorded_motion = []
+        self.recorded_ref = []
+        self.recorded_events = []
+        self.recorded_words = []
         
-        self.fnirs_colors = {
-            'Ch1': '#E74C3C',
-            'Ch2': '#3498DB',
-            'Ch3': '#2ECC71',
-            'Ch4': '#F39C12'
-        }
+        # Last values for interpolation
+        self.last_eeg_data = None
+        self.last_fnirs_data = None
+        self.last_motion_data = None
+        self.last_ref_data = None
         
-        # Spectral analysis parameters
-        self.sample_rate = 256  # Muse EEG sample rate
-        self.spectral_window_size = 512  # FFT window size
+        # Stats
+        self.packet_count = 0
+        self.eeg_packet_count = 0
+        self.fnirs_packet_count = 0
+        
+        # Cleanup handlers
+        self.shutting_down = False
+        atexit.register(self.cleanup_on_exit)
+        sig.signal(sig.SIGINT, self.signal_handler)
+        
+        # Spectral parameters
+        self.sample_rate = 256
+        self.spectral_window_size = 512
+        self.max_freq = 70
         self.freq_bands = {
             'Delta': (0.5, 4),
             'Theta': (4, 8),
@@ -759,195 +507,103 @@ class MuseAthenaVisualizer:
             'Beta': (13, 30),
             'Gamma': (30, 50)
         }
-        self.max_freq = 70  # Maximum frequency to display
         
-        # Stats
-        self.packet_count = 0
-        self.eeg_packet_count = 0
-        self.fnirs_packet_count = 0
-        
-        # Recording functionality - optimized for performance
-        self.is_recording = False
-        self.recording_start_time = None
-        self.record_button = None
-        
-        # Data storage for ML - using regular lists for efficiency
-        self.recorded_timestamps = []
-        self.recorded_eeg = []
-        self.recorded_fnirs = []
-        self.recorded_motion = []
-        self.recorded_ref = []
-        self.recorded_events = []  # List of (timestamp, event_type, clicked_word) tuples
-        self.recorded_words = []  # List of current words at each timestamp
-        
-        # For tracking the last saved data
-        self.last_eeg_data = None
-        self.last_fnirs_data = None
-        self.last_motion_data = None
-        self.last_ref_data = None
-        
-        # Flag to track if we're in the process of shutting down
-        self.shutting_down = False
-        
-        # Register cleanup handlers
-        atexit.register(self.cleanup_on_exit)
-        sig.signal(sig.SIGINT, self.signal_handler)
-        
-    def signal_handler(self, signum, frame):
-        """Handle Ctrl+C gracefully"""
-        print("\n\nReceived interrupt signal. Saving data if recording...")
-        self.cleanup_on_exit()
-        sys.exit(0)
-    
-    def cleanup_on_exit(self):
-        """Cleanup function called on exit"""
-        if self.shutting_down:
-            return
-        self.shutting_down = True
-        
-        if self.is_recording and len(self.recorded_timestamps) > 0:
-            print("\nRecording in progress. Auto-saving data...")
-            # Auto-save synchronously since we're exiting
-            self.save_recording_npz(auto_save=True)
-        
-        self.running = False
-        if self.socket:
-            self.socket.close()
-    
-    def parse_osc_string(self, data, offset):
-        """Parse null-terminated, 4-byte aligned string from OSC data"""
-        end = data.find(b'\x00', offset)
-        if end == -1:
-            return None, offset
-        
-        string = data[offset:end].decode('ascii')
-        offset = ((end + 4) // 4) * 4
-        return string, offset
+        # Colors
+        self.eeg_colors = {'TP9': '#FF6B6B', 'AF7': '#4ECDC4', 
+                          'AF8': '#45B7D1', 'TP10': '#96CEB4'}
+        self.fnirs_colors = {f'Ch{i}': c for i, c in 
+                            zip(range(1,5), ['#E74C3C', '#3498DB', '#2ECC71', '#F39C12'])}
     
     def parse_osc_message(self, data):
-        """Parse an OSC message"""
+        """Parse OSC message from binary data"""
         try:
-            offset = 0
+            def parse_string(data, offset):
+                end = data.find(b'\x00', offset)
+                if end == -1:
+                    return None, offset
+                string = data[offset:end].decode('ascii')
+                offset = ((end + 4) // 4) * 4
+                return string, offset
             
-            # Parse address
-            address, offset = self.parse_osc_string(data, offset)
+            offset = 0
+            address, offset = parse_string(data, offset)
             if not address:
                 return None
             
-            # Add leading / if missing
             if not address.startswith('/'):
                 address = '/' + address
             
-            # Parse type tags
-            type_tags, offset = self.parse_osc_string(data, offset)
+            type_tags, offset = parse_string(data, offset)
             if not type_tags or not type_tags.startswith(','):
                 return None
             
             type_tags = type_tags[1:]
-            
-            # Parse arguments
             args = []
+            
             for tag in type_tags:
-                if tag == 'f':  # float
-                    if offset + 4 > len(data):
-                        break
-                    value = struct.unpack('>f', data[offset:offset+4])[0]
-                    args.append(value)
+                if tag == 'f' and offset + 4 <= len(data):
+                    args.append(struct.unpack('>f', data[offset:offset+4])[0])
                     offset += 4
-                elif tag == 'i':  # int
-                    if offset + 4 > len(data):
-                        break
-                    value = struct.unpack('>i', data[offset:offset+4])[0]
-                    args.append(value)
+                elif tag == 'i' and offset + 4 <= len(data):
+                    args.append(struct.unpack('>i', data[offset:offset+4])[0])
                     offset += 4
             
-            return {'address': address, 'args': args, 'type_tags': type_tags}
-            
-        except Exception as e:
+            return {'address': address, 'args': args}
+        except:
             return None
     
     def process_osc_message(self, message):
         """Process incoming OSC message"""
         address = message['address']
         args = message['args']
-        type_tags = message['type_tags']
         timestamp = time.time()
         
         with self.lock:
-            # Parse address: /username/datatype
             parts = address.strip('/').split('/')
             if len(parts) >= 2:
                 data_type = parts[1]
                 
-                # EEG data - 4 floats for Athena
                 if data_type == 'eeg' and len(args) == 4:
-                    # Add timestamp
                     self.timestamps.append(timestamp)
-                    
-                    channels = ['TP9', 'AF7', 'AF8', 'TP10']
-                    for ch, val in zip(channels, args):
+                    for ch, val in zip(['TP9', 'AF7', 'AF8', 'TP10'], args):
                         self.eeg_channels[ch].append(val)
                     self.eeg_packet_count += 1
-                    
-                    # Store for recording
                     self.last_eeg_data = args
                     
-                    # Record data if recording and not paused - simplified for performance
                     if self.is_recording and not self.data_collection_paused:
-                        # Only append essential data
                         self.recorded_timestamps.append(timestamp)
                         self.recorded_eeg.append(args)
-
-                        # Append last known values for other channels
                         self.recorded_fnirs.append(self.last_fnirs_data if self.last_fnirs_data else [np.nan] * 8)
                         self.recorded_motion.append(self.last_motion_data if self.last_motion_data else [np.nan] * 6)
                         self.recorded_ref.append(self.last_ref_data if self.last_ref_data else [np.nan] * 2)
-
-                        # Record current word
                         self.recorded_words.append(self.current_word)
                     
-                    # Debug first few packets
                     if self.eeg_packet_count <= 5:
                         print(f"EEG packet {self.eeg_packet_count}: {args}")
                 
-                # fNIRS/Optics data - 8 floats
                 elif data_type == 'optics' and len(args) == 8:
-                    norm_channels = ['Ch1_norm', 'Ch2_norm', 'Ch3_norm', 'Ch4_norm']
-                    raw_channels = ['Ch1_raw', 'Ch2_raw', 'Ch3_raw', 'Ch4_raw']
-                    
-                    for i, (ch, val) in enumerate(zip(norm_channels + raw_channels, args)):
-                        self.fnirs_channels[ch].append(val)
-                    
+                    for i, ch in enumerate([f'Ch{j}_{t}' for j in range(1,5) for t in ['norm', 'raw']]):
+                        self.fnirs_channels[ch].append(args[i])
                     self.fnirs_packet_count += 1
                     self.last_fnirs_data = args
                     
-                    # Debug first few packets
                     if self.fnirs_packet_count <= 5:
                         print(f"fNIRS packet {self.fnirs_packet_count}: norm={args[:4]}, raw={args[4:]}")
                 
-                # Accelerometer data
                 elif data_type == 'acc' and len(args) == 3:
-                    channels = ['acc_x', 'acc_y', 'acc_z']
-                    for ch, val in zip(channels, args):
+                    for ch, val in zip(['acc_x', 'acc_y', 'acc_z'], args):
                         self.motion_channels[ch].append(val)
-                    
-                    # Update last motion data (first 3 values)
-                    if self.last_motion_data is None:
+                    if not self.last_motion_data:
                         self.last_motion_data = [0, 0, 0, 0, 0, 0]
                     self.last_motion_data[:3] = args
                 
-                # Gyroscope data
                 elif data_type == 'gyro' and len(args) == 3:
-                    channels = ['gyro_x', 'gyro_y', 'gyro_z']
-                    for ch, val in zip(channels, args):
+                    for ch, val in zip(['gyro_x', 'gyro_y', 'gyro_z'], args):
                         self.motion_channels[ch].append(val)
-                    
-                    # Update last motion data (last 3 values)
-                    if self.last_motion_data is None:
+                    if not self.last_motion_data:
                         self.last_motion_data = [0, 0, 0, 0, 0, 0]
                     self.last_motion_data[3:] = args
                 
-                # DRL/REF data
                 elif data_type == 'drlref' and len(args) >= 2:
                     self.ref_channels['DRL'].append(args[0])
                     self.ref_channels['REF'].append(args[1])
@@ -959,12 +615,9 @@ class MuseAthenaVisualizer:
             try:
                 data, addr = self.socket.recvfrom(4096)
                 self.packet_count += 1
-                
-                # Try to parse as OSC message
                 message = self.parse_osc_message(data)
                 if message:
                     self.process_osc_message(message)
-                        
             except socket.timeout:
                 continue
             except Exception as e:
@@ -972,88 +625,22 @@ class MuseAthenaVisualizer:
                     print(f"Receiver error: {e}")
     
     def next_text(self):
-        """Move to the next text passage"""
+        """Navigate to next text"""
         self.current_text_index = (self.current_text_index + 1) % len(TRAINING_TEXTS)
-        print(f"\n📖 Switched to text {self.current_text_index + 1}/{len(TRAINING_TEXTS)}")
-        if self.teleprompter and self.teleprompter.active:
-            self.teleprompter.update_display()
+        print(f"\n📖 Text {self.current_text_index + 1}/{len(TRAINING_TEXTS)}")
     
     def previous_text(self):
-        """Move to the previous text passage"""
+        """Navigate to previous text"""
         self.current_text_index = (self.current_text_index - 1) % len(TRAINING_TEXTS)
-        print(f"\n📖 Switched to text {self.current_text_index + 1}/{len(TRAINING_TEXTS)}")
-        if self.teleprompter and self.teleprompter.active:
-            self.teleprompter.update_display()
+        print(f"\n📖 Text {self.current_text_index + 1}/{len(TRAINING_TEXTS)}")
     
-    def setup_visualization(self):
-        """Setup matplotlib figure and axes"""
-        plt.style.use('dark_background')
-        
-        self.fig = plt.figure(figsize=(20, 12))
-        self.fig.patch.set_facecolor('#0a0a0a')
-        
-        # Create grid: 6 rows for different data types (removed text display)
-        gs = GridSpec(6, 2, figure=self.fig, 
-                     height_ratios=[3, 3, 3, 2, 2, 1],
-                     width_ratios=[4, 1],
-                     hspace=0.3)
-        
-        # Main plots
-        self.axes['eeg'] = self.fig.add_subplot(gs[0, 0])
-        self.axes['spectral'] = self.fig.add_subplot(gs[1, 0])
-        self.axes['fnirs'] = self.fig.add_subplot(gs[2, 0])
-        self.axes['motion'] = self.fig.add_subplot(gs[3, 0])
-        self.axes['gyro'] = self.fig.add_subplot(gs[4, 0])
-        self.axes['ref'] = self.fig.add_subplot(gs[5, 0])
-        
-        # Info panel
-        self.axes['info'] = self.fig.add_subplot(gs[:5, 1])
-        
-        # Configure axes
-        for name, ax in self.axes.items():
-            ax.set_facecolor('#1a1a1a')
-            if name != 'info':
-                ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
-                ax.grid(True, which='minor', alpha=0.1, linestyle=':', linewidth=0.5)
-        
-        # Titles and labels
-        self.axes['eeg'].set_title('EEG Channels (4 channels)', fontsize=14, color='#4ECDC4', pad=10)
-        self.axes['eeg'].set_ylabel('Amplitude (µV)')
-        
-        self.axes['spectral'].set_title('Spectral Analysis - Power Spectral Density', fontsize=14, color='#FFD93D', pad=10)
-        self.axes['spectral'].set_ylabel('Power (dB)')
-        self.axes['spectral'].set_xlabel('Frequency (Hz)')
-        
-        self.axes['fnirs'].set_title('fNIRS/Optics - Functional Near-Infrared Spectroscopy', fontsize=14, color='#E74C3C', pad=10)
-        self.axes['fnirs'].set_ylabel('Intensity')
-        
-        self.axes['motion'].set_title('Accelerometer', fontsize=14, color='#96CEB4', pad=10)
-        self.axes['motion'].set_ylabel('Acceleration (g)')
-        
-        self.axes['gyro'].set_title('Gyroscope', fontsize=14, color='#9B59B6', pad=10)
-        self.axes['gyro'].set_ylabel('Angular velocity (°/s)')
-        
-        self.axes['ref'].set_title('Reference Electrodes', fontsize=12, color='#95A5A6', pad=10)
-        self.axes['ref'].set_ylabel('Voltage')
-        self.axes['ref'].set_xlabel('Time (s)')
-        
-        # Info panel setup
-        self.axes['info'].set_xticks([])
-        self.axes['info'].set_yticks([])
-        for spine in self.axes['info'].spines.values():
-            spine.set_visible(False)
-        self.axes['info'].set_title('Signal Statistics', fontsize=14, color='#FFD93D', pad=10)
-        
-        # Add record button
-        ax_button = plt.axes([0.02, 0.95, 0.08, 0.04])
-        self.record_button = Button(ax_button, 'Begin Recording', 
-                                   color='#2a2a2a', hovercolor='#3a3a3a')
-        self.record_button.on_clicked(self.toggle_recording)
-        
-        # Initialize plot lines
-        self._initialize_lines()
-        
-        plt.tight_layout()
+    def pause_data_collection(self):
+        """Pause data collection during labeling"""
+        self.data_collection_paused = True
+    
+    def resume_data_collection(self):
+        """Resume data collection"""
+        self.data_collection_paused = False
     
     def toggle_recording(self, event=None):
         """Toggle recording state"""
@@ -1068,35 +655,21 @@ class MuseAthenaVisualizer:
                 self.recorded_motion = []
                 self.recorded_ref = []
                 self.recorded_events = []
-                self.recorded_words = []  # Initialize word tracking
+                self.recorded_words = []
             
             if self.record_button:
                 self.record_button.label.set_text('Stop Recording')
                 self.record_button.color = '#ff4444'
                 self.record_button.hovercolor = '#ff6666'
             
-            # Update teleprompter status
-            if self.teleprompter and self.teleprompter.active:
-                self.teleprompter.update_status()
-            
             print(f"\n{'='*50}")
             print(f"RECORDING STARTED at {datetime.fromtimestamp(self.recording_start_time).strftime('%Y-%m-%d %H:%M:%S')}")
             print(f"{'='*50}")
-            print("\n👁 CURSOR TRACKING ACTIVE - Recording words under cursor")
-            print("\n🖱️ CONFUSION LABELING:")
-            print("  Press 'C' to toggle labeling mode")
-            print("  In labeling mode: LEFT-CLICK = word confusion, RIGHT-CLICK = sentence confusion")
-            print("  Data collection pauses during labeling")
-            print("  '1', '2', '3' = Other markers (optional)")
-            print("\n📖 TEXT NAVIGATION (in teleprompter window):")
-            print("  ↑/↓ = Scroll text")
-            print("  ←/→ = Previous/Next passage")
-            print("\nData will be saved as .npz file when recording stops")
         else:
             # Stop recording
             self.is_recording = False
             
-            # Copy data for saving (do this before updating UI)
+            # Save data
             with self.lock:
                 save_data = {
                     'timestamps': self.recorded_timestamps.copy(),
@@ -1105,7 +678,7 @@ class MuseAthenaVisualizer:
                     'motion': self.recorded_motion.copy(),
                     'ref': self.recorded_ref.copy(),
                     'events': self.recorded_events.copy(),
-                    'words': self.recorded_words.copy(),  # Add words data
+                    'words': self.recorded_words.copy(),
                     'start_time': self.recording_start_time,
                     'current_text_index': self.current_text_index
                 }
@@ -1113,74 +686,51 @@ class MuseAthenaVisualizer:
                 events_count = len(self.recorded_events)
                 unique_words = len(set(w for w in self.recorded_words if w))
             
-            # Update UI immediately
             if self.record_button:
                 self.record_button.label.set_text('Saving...')
                 self.record_button.color = '#888888'
-                self.record_button.hovercolor = '#888888'
             
             duration = time.time() - self.recording_start_time
             print(f"\n{'='*50}")
             print(f"RECORDING STOPPED")
-            print(f"Duration: {duration:.1f} seconds")
-            print(f"Data points: {data_points}")
-            print(f"Events marked: {events_count}")
-            print(f"Unique words tracked: {unique_words}")
-            print(f"Text passage: {self.current_text_index + 1}/{len(TRAINING_TEXTS)}")
+            print(f"Duration: {duration:.1f}s, Points: {data_points}, Events: {events_count}")
             print(f"{'='*50}")
-            print("\nPreparing to save...")
             
-            # Save in a separate thread to avoid blocking
-            save_thread = threading.Thread(
-                target=self._save_recording_thread,
-                args=(save_data,)
-            )
+            # Save in thread
+            save_thread = threading.Thread(target=self._save_recording_thread, args=(save_data,))
             save_thread.daemon = True
             save_thread.start()
     
-    def record_event(self, event_type, clicked_word=""):
-        """Record an event with timestamp and clicked word"""
+    def record_event(self, event_type, text=""):
+        """Record confusion event with text"""
         if self.is_recording:
             timestamp = time.time()
             relative_time = timestamp - self.recording_start_time
-            self.recorded_events.append((timestamp, event_type, clicked_word))
+            self.recorded_events.append((timestamp, event_type, text))
             
-            # Special messages for confusion events
             if event_type == 'word_confusion':
-                print(f"🤔 WORD confusion marked at {relative_time:.2f}s on '{clicked_word}'")
+                print(f"🤔 WORD/PHRASE confusion at {relative_time:.2f}s: '{text[:50]}...'")
             elif event_type == 'sentence_confusion':
-                print(f"📄 SENTENCE confusion marked at {relative_time:.2f}s near '{clicked_word}'")
-            else:
-                print(f"📌 Event '{event_type}' marked at {relative_time:.2f}s")
-            
-            # Update teleprompter if active
-            if self.teleprompter and self.teleprompter.active:
-                self.teleprompter.update_status()
+                print(f"📄 SENTENCE confusion at {relative_time:.2f}s: '{text[:50]}...'")
     
     def _save_recording_thread(self, save_data):
-        """Save recording in a separate thread to avoid blocking"""
+        """Save recording data in thread"""
         try:
-            # Show save dialog in thread-safe way
+            # Get filename
             filename = self._get_save_filename()
             
             if filename:
-                # Update button to show progress
-                if self.record_button:
-                    self.record_button.label.set_text('Converting...')
-                    plt.draw()  # Force UI update
+                print("Converting data...")
                 
-                # Convert lists to numpy arrays (this is the slow part)
-                print("Converting data to numpy arrays...")
+                # Convert to numpy arrays
                 timestamps = np.array(save_data['timestamps'])
                 eeg_data = np.array(save_data['eeg']) if save_data['eeg'] else np.array([])
                 fnirs_data = np.array(save_data['fnirs']) if save_data['fnirs'] else np.array([])
                 motion_data = np.array(save_data['motion']) if save_data['motion'] else np.array([])
                 ref_data = np.array(save_data['ref']) if save_data['ref'] else np.array([])
-                
-                # Convert words - handle string array
                 words_array = np.array(save_data['words'], dtype=object) if save_data['words'] else np.array([], dtype=object)
                 
-                # Convert events - now includes clicked words
+                # Events
                 if save_data['events']:
                     event_timestamps = np.array([e[0] for e in save_data['events']])
                     event_types = np.array([e[1] for e in save_data['events']])
@@ -1190,10 +740,9 @@ class MuseAthenaVisualizer:
                     event_types = np.array([])
                     event_words = np.array([], dtype=object)
                 
-                # Calculate relative timestamps
                 relative_timestamps = timestamps - timestamps[0] if len(timestamps) > 0 else np.array([])
                 
-                # Create metadata
+                # Metadata
                 metadata = {
                     'device': 'Muse S Athena',
                     'start_time': float(save_data['start_time']),
@@ -1213,13 +762,7 @@ class MuseAthenaVisualizer:
                     'event_types': ['word_confusion', 'sentence_confusion', 'marker_1', 'marker_2', 'marker_3']
                 }
                 
-                # Update button
-                if self.record_button:
-                    self.record_button.label.set_text('Writing file...')
-                    plt.draw()  # Force UI update
-                
                 print("Saving to file...")
-                # Save as compressed numpy file
                 np.savez_compressed(
                     filename,
                     timestamps=timestamps,
@@ -1230,86 +773,34 @@ class MuseAthenaVisualizer:
                     ref=ref_data,
                     event_timestamps=event_timestamps,
                     event_types=event_types,
-                    event_words=event_words,  # Add clicked words
-                    words=words_array,  # Add cursor tracking words
+                    event_words=event_words,
+                    words=words_array,
                     metadata=metadata
                 )
                 
-                print(f"\n{'='*50}")
-                print(f"✅ DATA SAVED SUCCESSFULLY")
-                print(f"File: {filename}")
+                print(f"\n✅ DATA SAVED: {filename}")
                 print(f"Size: {os.path.getsize(filename) / 1024:.1f} KB")
-                print(f"\nContents:")
-                print(f"  - {len(timestamps)} timestamped samples")
-                print(f"  - EEG data: {eeg_data.shape if eeg_data.size > 0 else 'None'}")
-                print(f"  - fNIRS data: {fnirs_data.shape if fnirs_data.size > 0 else 'None'}")
-                print(f"  - Motion data: {motion_data.shape if motion_data.size > 0 else 'None'}")
-                print(f"  - Reference data: {ref_data.shape if ref_data.size > 0 else 'None'}")
-                print(f"  - Word tracking: {len(words_array)} samples")
-                print(f"  - {len(event_timestamps)} events marked")
-                print(f"  - Text passage: {save_data['current_text_index'] + 1}/{len(TRAINING_TEXTS)}")
-                
-                if len(event_timestamps) > 0:
-                    print(f"\nEvent Summary:")
-                    # Count different event types
-                    word_confusion_count = np.sum(event_types == 'word_confusion')
-                    sentence_confusion_count = np.sum(event_types == 'sentence_confusion')
-                    other_count = len(event_types) - word_confusion_count - sentence_confusion_count
-                    
-                    if word_confusion_count > 0:
-                        print(f"  🤔 Word confusion: {word_confusion_count} times")
-                        # Show clicked words for word confusion
-                        word_confusion_words = [w for t, w in zip(event_types, event_words) if t == 'word_confusion' and w]
-                        if word_confusion_words:
-                            unique_confused_words = list(set(word_confusion_words))
-                            print(f"     Confused words: {', '.join(unique_confused_words[:10])}")
-                    
-                    if sentence_confusion_count > 0:
-                        print(f"  📄 Sentence confusion: {sentence_confusion_count} times")
-                    
-                    if other_count > 0:
-                        print(f"  📌 Other markers: {other_count} times")
-                
-                # Word tracking summary
-                unique_words = set(w for w in words_array if w)
-                if unique_words:
-                    print(f"\nWord Tracking Summary:")
-                    print(f"  - {len(unique_words)} unique words tracked")
-                    print(f"  - Sample words: {', '.join(list(unique_words)[:10])}")
-                
-                print(f"\nTo load this data:")
-                print(f"  data = np.load('{os.path.basename(filename)}')")
-                print(f"  eeg = data['eeg']")
-                print(f"  words = data['words']")
-                print(f"  event_words = data['event_words']  # Words that were clicked")
-                print(f"  events = data['event_timestamps']")
-                print(f"  metadata = data['metadata'].item()")
-                print(f"{'='*50}\n")
             else:
                 print("Save cancelled")
         
         except Exception as e:
             print(f"❌ Error saving data: {e}")
-            import traceback
-            traceback.print_exc()
         
         finally:
-            # Reset button state
             if self.record_button:
                 self.record_button.label.set_text('Begin Recording')
                 self.record_button.color = '#2a2a2a'
                 self.record_button.hovercolor = '#3a3a3a'
-                plt.draw()  # Force final UI update
+                plt.draw()
     
     def _get_save_filename(self):
-        """Get save filename using file dialog"""
+        """Get save filename with dialog"""
         root = tk.Tk()
         root.withdraw()
         root.lift()
         root.attributes('-topmost', True)
-        root.focus_force()
         
-        default_name = f"muse_athena_confusion_clicks_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        default_name = f"muse_athena_confusion_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         filename = filedialog.asksaveasfilename(
             parent=root,
             initialdir=os.path.expanduser("~/Downloads"),
@@ -1322,34 +813,34 @@ class MuseAthenaVisualizer:
         return filename
     
     def save_recording_npz(self, auto_save=False):
-        """Save the recorded data to NPZ file (for auto-save)"""
+        """Auto-save function for cleanup"""
         if len(self.recorded_timestamps) == 0:
-            print("No data to save")
             return
         
-        if auto_save:
-            # Prepare data for saving
-            save_data = {
-                'timestamps': self.recorded_timestamps,
-                'eeg': self.recorded_eeg,
-                'fnirs': self.recorded_fnirs,
-                'motion': self.recorded_motion,
-                'ref': self.recorded_ref,
-                'events': self.recorded_events,
-                'words': self.recorded_words,
-                'start_time': self.recording_start_time,
-                'current_text_index': self.current_text_index
-            }
-            
-            # Auto-save without dialog
-            default_dir = os.path.expanduser("~/Downloads")
-            os.makedirs(default_dir, exist_ok=True)
-            filename = os.path.join(default_dir, 
-                                   f"muse_athena_autosave_{datetime.now().strftime('%Y%m%d_%H%M%S')}.npz")
-            
-            print(f"Auto-saving to: {filename}")
-            
-            # Convert and save
+        # Prepare data
+        save_data = {
+            'timestamps': self.recorded_timestamps,
+            'eeg': self.recorded_eeg,
+            'fnirs': self.recorded_fnirs,
+            'motion': self.recorded_motion,
+            'ref': self.recorded_ref,
+            'events': self.recorded_events,
+            'words': self.recorded_words,
+            'start_time': self.recording_start_time,
+            'current_text_index': self.current_text_index
+        }
+        
+        # Auto-save
+        default_dir = os.path.expanduser("~/Downloads")
+        os.makedirs(default_dir, exist_ok=True)
+        filename = os.path.join(default_dir, 
+                               f"muse_athena_autosave_{datetime.now().strftime('%Y%m%d_%H%M%S')}.npz")
+        
+        print(f"Auto-saving to: {filename}")
+        
+        # Quick save without conversion
+        try:
+            # Convert to arrays
             timestamps = np.array(save_data['timestamps'])
             eeg_data = np.array(save_data['eeg']) if save_data['eeg'] else np.array([])
             fnirs_data = np.array(save_data['fnirs']) if save_data['fnirs'] else np.array([])
@@ -1397,65 +888,148 @@ class MuseAthenaVisualizer:
             )
             
             print(f"Auto-save complete: {filename}")
+        except Exception as e:
+            print(f"Auto-save error: {e}")
+    
+    def cleanup_on_exit(self):
+        """Clean exit handler"""
+        if self.shutting_down:
+            return
+        self.shutting_down = True
+        
+        if self.is_recording and len(self.recorded_timestamps) > 0:
+            print("\nRecording in progress. Auto-saving...")
+            self.save_recording_npz(auto_save=True)
+        
+        self.running = False
+        if self.socket:
+            self.socket.close()
+    
+    def signal_handler(self, signum, frame):
+        """Handle Ctrl+C"""
+        print("\n\nReceived interrupt. Saving if recording...")
+        self.cleanup_on_exit()
+        sys.exit(0)
+    
+    def setup_visualization(self):
+        """Setup matplotlib visualization"""
+        plt.style.use('dark_background')
+        
+        self.fig = plt.figure(figsize=(20, 12))
+        self.fig.patch.set_facecolor('#0a0a0a')
+        
+        # Create grid
+        gs = GridSpec(6, 2, figure=self.fig, 
+                     height_ratios=[3, 3, 3, 2, 2, 1],
+                     width_ratios=[4, 1],
+                     hspace=0.3)
+        
+        # Create axes
+        self.axes = {
+            'eeg': self.fig.add_subplot(gs[0, 0]),
+            'spectral': self.fig.add_subplot(gs[1, 0]),
+            'fnirs': self.fig.add_subplot(gs[2, 0]),
+            'motion': self.fig.add_subplot(gs[3, 0]),
+            'gyro': self.fig.add_subplot(gs[4, 0]),
+            'ref': self.fig.add_subplot(gs[5, 0]),
+            'info': self.fig.add_subplot(gs[:5, 1])
+        }
+        
+        # Configure axes
+        for name, ax in self.axes.items():
+            ax.set_facecolor('#1a1a1a')
+            if name != 'info':
+                ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
+        
+        # Titles
+        titles = {
+            'eeg': ('EEG Channels (4 channels)', '#4ECDC4'),
+            'spectral': ('Spectral Analysis - Power Spectral Density', '#FFD93D'),
+            'fnirs': ('fNIRS/Optics - Functional Near-Infrared Spectroscopy', '#E74C3C'),
+            'motion': ('Accelerometer', '#96CEB4'),
+            'gyro': ('Gyroscope', '#9B59B6'),
+            'ref': ('Reference Electrodes', '#95A5A6')
+        }
+        
+        for ax_name, (title, color) in titles.items():
+            self.axes[ax_name].set_title(title, fontsize=14, color=color, pad=10)
+        
+        # Labels
+        self.axes['eeg'].set_ylabel('Amplitude (µV)')
+        self.axes['spectral'].set_ylabel('Power (dB)')
+        self.axes['spectral'].set_xlabel('Frequency (Hz)')
+        self.axes['fnirs'].set_ylabel('Intensity')
+        self.axes['motion'].set_ylabel('Acceleration (g)')
+        self.axes['gyro'].set_ylabel('Angular velocity (°/s)')
+        self.axes['ref'].set_ylabel('Voltage')
+        self.axes['ref'].set_xlabel('Time (s)')
+        
+        # Info panel
+        self.axes['info'].set_xticks([])
+        self.axes['info'].set_yticks([])
+        for spine in self.axes['info'].spines.values():
+            spine.set_visible(False)
+        self.axes['info'].set_title('Signal Statistics', fontsize=14, color='#FFD93D', pad=10)
+        
+        # Add record button
+        ax_button = plt.axes([0.02, 0.95, 0.08, 0.04])
+        self.record_button = Button(ax_button, 'Begin Recording', 
+                                   color='#2a2a2a', hovercolor='#3a3a3a')
+        self.record_button.on_clicked(self.toggle_recording)
+        
+        # Initialize lines
+        self._initialize_lines()
+        
+        plt.tight_layout()
     
     def _initialize_lines(self):
-        """Initialize all plot lines"""
-        # EEG lines - 4 channels
+        """Initialize plot lines"""
+        # EEG lines
         for ch, color in self.eeg_colors.items():
             line, = self.axes['eeg'].plot([], [], label=ch, color=color, 
-                                         linewidth=1.5, alpha=0.95,
-                                         linestyle='-', marker='',
-                                         antialiased=True)
+                                         linewidth=1.5, alpha=0.95)
             self.lines[f'eeg_{ch}'] = line
         
-        # Initialize spectral plot
+        # Spectral lines
         self.spectral_lines = {}
         for ch, color in self.eeg_colors.items():
             line, = self.axes['spectral'].plot([], [], label=ch, color=color, 
-                                              linewidth=1.5, alpha=0.9,
-                                              antialiased=True)
+                                              linewidth=1.5, alpha=0.9)
             self.spectral_lines[ch] = line
         
-        # Set up spectral axis
         self.axes['spectral'].set_xlim(0, self.max_freq)
-        self.axes['spectral'].set_ylabel('Power (dB)')
-        self.axes['spectral'].set_xlabel('Frequency (Hz)')
         
         # Add frequency band labels
         for band_name, (low, high) in self.freq_bands.items():
-            self.axes['spectral'].axvline(x=low, color='white', linestyle=':', alpha=0.3, linewidth=0.5)
+            self.axes['spectral'].axvline(x=low, color='white', linestyle=':', 
+                                         alpha=0.3, linewidth=0.5)
             mid_freq = (low + high) / 2
             if mid_freq < self.max_freq:
                 self.axes['spectral'].text(mid_freq, 0.98, band_name, 
                                          fontsize=8, color='white', alpha=0.7,
-                                         horizontalalignment='center',
-                                         verticalalignment='top',
+                                         ha='center', va='top',
                                          transform=self.axes['spectral'].get_xaxis_transform())
         
-        # fNIRS lines - normalized values only for main display
+        # fNIRS lines
         for i, (ch_base, color) in enumerate(self.fnirs_colors.items()):
             ch_norm = f'{ch_base}_norm'
             line, = self.axes['fnirs'].plot([], [], label=ch_base, 
-                                          color=color,
-                                          linewidth=1.5, alpha=0.9,
-                                          antialiased=True)
+                                          color=color, linewidth=1.5, alpha=0.9)
             self.lines[f'fnirs_{ch_norm}'] = line
         
-        # Motion lines - accelerometer
-        acc_colors = ['#3498DB', '#2ECC71', '#9B59B6']
-        for i, ch in enumerate(['acc_x', 'acc_y', 'acc_z']):
-            line, = self.axes['motion'].plot([], [], label=ch.replace('acc_', ''),
-                                           color=acc_colors[i],
-                                           linewidth=1.5, alpha=0.9)
-            self.lines[f'motion_{ch}'] = line
+        # Motion lines
+        colors = {
+            'acc': ['#3498DB', '#2ECC71', '#9B59B6'],
+            'gyro': ['#F39C12', '#E67E22', '#D35400']
+        }
         
-        # Gyroscope lines
-        gyro_colors = ['#F39C12', '#E67E22', '#D35400']
-        for i, ch in enumerate(['gyro_x', 'gyro_y', 'gyro_z']):
-            line, = self.axes['gyro'].plot([], [], label=ch.replace('gyro_', ''),
-                                         color=gyro_colors[i],
-                                         linewidth=1.5, alpha=0.9)
-            self.lines[f'motion_{ch}'] = line
+        for prefix, ax_name in [('acc', 'motion'), ('gyro', 'gyro')]:
+            for i, axis in enumerate(['x', 'y', 'z']):
+                ch = f'{prefix}_{axis}'
+                line, = self.axes[ax_name].plot([], [], label=axis,
+                                               color=colors[prefix][i],
+                                               linewidth=1.5, alpha=0.9)
+                self.lines[f'motion_{ch}'] = line
         
         # Reference lines
         ref_colors = ['#95A5A6', '#7F8C8D']
@@ -1466,20 +1040,16 @@ class MuseAthenaVisualizer:
             self.lines[f'ref_{ch}'] = line
         
         # Add legends
-        self.axes['eeg'].legend(loc='upper left', fontsize=8, ncol=4, 
-                               framealpha=0.7, bbox_to_anchor=(0.3, 1))
-        self.axes['spectral'].legend(loc='upper right', fontsize=8, ncol=4, framealpha=0.7)
-        self.axes['fnirs'].legend(loc='upper right', fontsize=8, ncol=4, framealpha=0.5)
-        self.axes['motion'].legend(loc='upper right', fontsize=8, ncol=3, framealpha=0.5)
-        self.axes['gyro'].legend(loc='upper right', fontsize=8, ncol=3, framealpha=0.5)
-        self.axes['ref'].legend(loc='upper right', fontsize=8, ncol=2, framealpha=0.5)
+        for ax_name in ['eeg', 'spectral', 'fnirs', 'motion', 'gyro', 'ref']:
+            self.axes[ax_name].legend(loc='upper right', fontsize=8, 
+                                     ncol=4 if ax_name in ['eeg', 'spectral'] else 3,
+                                     framealpha=0.5)
     
     def compute_spectrum(self, data, sample_rate=256):
-        """Compute power spectral density using Welch's method"""
+        """Compute power spectral density"""
         if len(data) < self.spectral_window_size:
             return None, None
         
-        # Use Welch's method for more stable spectrum estimation
         frequencies, psd = signal.welch(
             data, 
             fs=sample_rate, 
@@ -1488,53 +1058,47 @@ class MuseAthenaVisualizer:
             scaling='density'
         )
         
-        # Limit to 0-70 Hz
         freq_mask = frequencies <= self.max_freq
         frequencies = frequencies[freq_mask]
         psd = psd[freq_mask]
-        
-        # Convert to dB
         psd_db = 10 * np.log10(psd + 1e-10)
         
         return frequencies, psd_db
     
     def update_plot(self, frame):
-        """Update all plots with latest data"""
+        """Update all plots"""
         with self.lock:
             if len(self.timestamps) < 2:
                 return list(self.lines.values()) + list(self.spectral_lines.values())
             
-            # Get the minimum length across all EEG channels to ensure alignment
+            # Get minimum length for alignment
             min_eeg_length = min(len(self.eeg_channels[ch]) for ch in self.eeg_channels 
                                if len(self.eeg_channels[ch]) > 0)
             
             if min_eeg_length < 2:
                 return list(self.lines.values()) + list(self.spectral_lines.values())
             
-            # Calculate time axis based on actual timestamps
+            # Time axis
             timestamps = np.array(list(self.timestamps)[-min_eeg_length:])
             if len(timestamps) > 1:
-                # Use actual time differences
-                time_axis = timestamps - timestamps[-1]  # Make most recent = 0
-                
-                # Calculate display window based on time
+                time_axis = timestamps - timestamps[-1]
                 display_mask = time_axis >= -self.window_duration
                 display_samples = np.sum(display_mask)
             else:
                 return list(self.lines.values()) + list(self.spectral_lines.values())
             
             # Update EEG
-            eeg_values_for_scaling = []
             filtered_eeg_data = {}
+            eeg_values_for_scaling = []
             
-            for ch_name in ['TP9', 'AF7', 'AF8', 'TP10']:
+            for ch_name in self.eeg_channels:
                 if ch_name in self.eeg_channels and len(self.eeg_channels[ch_name]) >= min_eeg_length:
                     line_key = f'eeg_{ch_name}'
                     if line_key in self.lines:
-                        # Get aligned data
+                        # Get and filter data
                         data_array = np.array(list(self.eeg_channels[ch_name])[-min_eeg_length:])
                         
-                        # Apply high-pass filter to remove DC
+                        # High-pass filter
                         if len(data_array) > 50:
                             window_size = min(50, len(data_array) // 4)
                             if window_size > 1:
@@ -1547,10 +1111,9 @@ class MuseAthenaVisualizer:
                         else:
                             filtered_data = data_array - np.mean(data_array)
                         
-                        # Store for spectral analysis
                         filtered_eeg_data[ch_name] = filtered_data
                         
-                        # Apply display mask
+                        # Update line
                         display_time = time_axis[display_mask]
                         display_data = filtered_data[display_mask]
                         
@@ -1561,76 +1124,41 @@ class MuseAthenaVisualizer:
             if len(filtered_eeg_data) == 4:
                 all_psd_values = []
                 
-                for ch_name in ['TP9', 'AF7', 'AF8', 'TP10']:
-                    if ch_name in filtered_eeg_data and ch_name in self.spectral_lines:
-                        spectral_window_samples = min(len(filtered_eeg_data[ch_name]), 
-                                                    int(self.sample_rate * 4))
-                        data_for_spectrum = filtered_eeg_data[ch_name][-spectral_window_samples:]
+                for ch_name, data in filtered_eeg_data.items():
+                    if ch_name in self.spectral_lines:
+                        frequencies, psd = self.compute_spectrum(data[-int(self.sample_rate * 4):])
                         
-                        frequencies, psd = self.compute_spectrum(data_for_spectrum, self.sample_rate)
-                        
-                        if frequencies is not None and psd is not None:
+                        if frequencies is not None:
                             self.spectral_lines[ch_name].set_data(frequencies, psd)
                             all_psd_values.extend(psd)
                 
-                # Auto-scale y-axis
                 if all_psd_values:
                     y_min = np.percentile(all_psd_values, 5) - 5
                     y_max = np.percentile(all_psd_values, 95) + 5
                     self.axes['spectral'].set_ylim(y_min, y_max)
             
-            # Update fNIRS - show normalized values
-            fnirs_norm_channels = ['Ch1_norm', 'Ch2_norm', 'Ch3_norm', 'Ch4_norm']
-            for ch_name in fnirs_norm_channels:
-                if ch_name in self.fnirs_channels and len(self.fnirs_channels[ch_name]) > 0:
-                    line_key = f'fnirs_{ch_name}'
-                    if line_key in self.lines:
-                        data_array = np.array(list(self.fnirs_channels[ch_name]))
-                        if len(data_array) >= len(display_mask):
-                            aligned_data = data_array[-len(display_mask):]
-                            self.lines[line_key].set_data(
-                                time_axis[display_mask],
-                                aligned_data[display_mask]
-                            )
-            
-            # Update Motion (accelerometer)
-            for ch_name in ['acc_x', 'acc_y', 'acc_z']:
-                if ch_name in self.motion_channels and len(self.motion_channels[ch_name]) > 0:
-                    line_key = f'motion_{ch_name}'
-                    if line_key in self.lines:
-                        data_array = np.array(list(self.motion_channels[ch_name]))
-                        if len(data_array) >= len(display_mask):
-                            aligned_data = data_array[-len(display_mask):]
-                            self.lines[line_key].set_data(
-                                time_axis[display_mask],
-                                aligned_data[display_mask]
-                            )
-            
-            # Update Gyroscope
-            for ch_name in ['gyro_x', 'gyro_y', 'gyro_z']:
-                if ch_name in self.motion_channels and len(self.motion_channels[ch_name]) > 0:
-                    line_key = f'motion_{ch_name}'
-                    if line_key in self.lines:
-                        data_array = np.array(list(self.motion_channels[ch_name]))
-                        if len(data_array) >= len(display_mask):
-                            aligned_data = data_array[-len(display_mask):]
-                            self.lines[line_key].set_data(
-                                time_axis[display_mask],
-                                aligned_data[display_mask]
-                            )
-            
-            # Update Reference
-            for ch_name, data in self.ref_channels.items():
-                if len(data) > 0:
-                    line_key = f'ref_{ch_name}'
-                    if line_key in self.lines:
-                        data_array = np.array(list(data))
-                        if len(data_array) >= len(display_mask):
-                            aligned_data = data_array[-len(display_mask):]
-                            self.lines[line_key].set_data(
-                                time_axis[display_mask],
-                                aligned_data[display_mask]
-                            )
+            # Update other channels (fNIRS, motion, ref)
+            for channel_dict, prefix in [(self.fnirs_channels, 'fnirs'), 
+                                        (self.motion_channels, 'motion'),
+                                        (self.ref_channels, 'ref')]:
+                for ch_name, data_deque in channel_dict.items():
+                    if len(data_deque) > 0:
+                        # Determine correct line key
+                        if prefix == 'fnirs' and ch_name.endswith('_norm'):
+                            line_key = f'{prefix}_{ch_name}'
+                        elif prefix == 'fnirs' and ch_name.endswith('_raw'):
+                            continue  # Skip raw channels for display
+                        else:
+                            line_key = f'{prefix}_{ch_name}'
+                        
+                        if line_key in self.lines:
+                            data_array = np.array(list(data_deque))
+                            if len(data_array) >= len(display_mask):
+                                aligned_data = data_array[-len(display_mask):]
+                                self.lines[line_key].set_data(
+                                    time_axis[display_mask],
+                                    aligned_data[display_mask]
+                                )
             
             # Update axes limits
             for ax in [self.axes['eeg'], self.axes['fnirs'], 
@@ -1639,19 +1167,12 @@ class MuseAthenaVisualizer:
                 ax.relim()
                 ax.autoscale_view(scalex=False, scaley=True)
             
-            # Special handling for EEG scaling
+            # Special EEG scaling
             if eeg_values_for_scaling:
                 eeg_std = np.std(eeg_values_for_scaling)
                 eeg_median = np.median(eeg_values_for_scaling)
                 y_range = 4 * eeg_std
                 self.axes['eeg'].set_ylim(eeg_median - y_range/2, eeg_median + y_range/2)
-                
-                self.axes['eeg'].text(0.02, 0.98, 
-                                    f'Scale: ±{y_range/2:.1f} µV', 
-                                    transform=self.axes['eeg'].transAxes, 
-                                    fontsize=9,
-                                    verticalalignment='top',
-                                    bbox=dict(boxstyle='round', facecolor='black', alpha=0.7))
             
             # Update info panel
             self._update_info_panel()
@@ -1681,18 +1202,18 @@ class MuseAthenaVisualizer:
             self.axes['info'].text(0.1, y_pos, status_text,
                                  fontsize=10, color='#ff4444', weight='bold',
                                  transform=self.axes['info'].transAxes)
+            
             y_pos -= 0.04
             self.axes['info'].text(0.1, y_pos, f'Samples: {len(self.recorded_timestamps)}',
                                  fontsize=9, color='#ff6666',
                                  transform=self.axes['info'].transAxes)
-            y_pos -= 0.04
             
-            # Count confusion events
+            # Event counts
+            y_pos -= 0.04
             word_confusion = sum(1 for _, event_type, _ in self.recorded_events 
                                 if event_type == 'word_confusion')
             sentence_confusion = sum(1 for _, event_type, _ in self.recorded_events 
                                    if event_type == 'sentence_confusion')
-            other_count = len(self.recorded_events) - word_confusion - sentence_confusion
             
             self.axes['info'].text(0.1, y_pos, f'🤔 Word: {word_confusion}', 
                                  fontsize=9, color='#ffaa44',
@@ -1701,23 +1222,12 @@ class MuseAthenaVisualizer:
             self.axes['info'].text(0.1, y_pos, f'📄 Sentence: {sentence_confusion}', 
                                  fontsize=9, color='#ff8844',
                                  transform=self.axes['info'].transAxes)
-            y_pos -= 0.04
-            if other_count > 0:
-                self.axes['info'].text(0.1, y_pos, f'📌 Other: {other_count}', 
-                                     fontsize=9, color='#66aaff',
-                                     transform=self.axes['info'].transAxes)
-                y_pos -= 0.04
         
         # Current word
-        y_pos -= 0.04
-        if self.current_word:
-            self.axes['info'].text(0.1, y_pos, f'Word: {self.current_word[:15]}', 
-                                 fontsize=9, color='#FFD93D',
-                                 transform=self.axes['info'].transAxes)
-        else:
-            self.axes['info'].text(0.1, y_pos, 'Word: -', 
-                                 fontsize=9, color='#aaaaaa',
-                                 transform=self.axes['info'].transAxes)
+        y_pos -= 0.06
+        self.axes['info'].text(0.1, y_pos, f'Word: {self.current_word[:15] if self.current_word else "-"}', 
+                             fontsize=9, color='#FFD93D',
+                             transform=self.axes['info'].transAxes)
         
         # Text info
         y_pos -= 0.04
@@ -1732,8 +1242,8 @@ class MuseAthenaVisualizer:
                              transform=self.axes['info'].transAxes)
         y_pos -= 0.05
         
-        for ch in ['TP9', 'AF7', 'AF8', 'TP10']:
-            if ch in self.eeg_channels and len(self.eeg_channels[ch]) > 0:
+        for ch in self.eeg_channels:
+            if len(self.eeg_channels[ch]) > 0:
                 data = np.array(list(self.eeg_channels[ch])[-100:])
                 mean_val = np.mean(data)
                 std_val = np.std(data)
@@ -1745,64 +1255,6 @@ class MuseAthenaVisualizer:
                                      transform=self.axes['info'].transAxes)
                 y_pos -= 0.04
         
-        # Frequency band power
-        y_pos -= 0.04
-        self.axes['info'].text(0.1, y_pos, 'Band Power:', fontsize=10,
-                             weight='bold', color='#FFD93D',
-                             transform=self.axes['info'].transAxes)
-        y_pos -= 0.05
-        
-        # Calculate average band powers
-        if hasattr(self, 'spectral_lines'):
-            band_powers = {band: [] for band in self.freq_bands.keys()}
-            
-            for ch_name, line in self.spectral_lines.items():
-                xdata, ydata = line.get_data()
-                if len(xdata) > 0 and len(ydata) > 0:
-                    for band_name, (low, high) in self.freq_bands.items():
-                        band_mask = (xdata >= low) & (xdata <= high)
-                        if np.any(band_mask):
-                            band_power = np.mean(ydata[band_mask])
-                            band_powers[band_name].append(band_power)
-            
-            for band_name in self.freq_bands.keys():
-                if band_powers[band_name]:
-                    avg_power = np.mean(band_powers[band_name])
-                    self.axes['info'].text(0.15, y_pos, f'{band_name}:', fontsize=9,
-                                         color='white',
-                                         transform=self.axes['info'].transAxes)
-                    self.axes['info'].text(0.4, y_pos, f'{avg_power:.1f} dB',
-                                         fontsize=9, color='white',
-                                         transform=self.axes['info'].transAxes)
-                    y_pos -= 0.04
-        
-        # fNIRS stats
-        y_pos -= 0.04
-        self.axes['info'].text(0.1, y_pos, 'fNIRS:', fontsize=10,
-                             weight='bold', color='#E74C3C',
-                             transform=self.axes['info'].transAxes)
-        y_pos -= 0.05
-        
-        # Show both normalized and raw values
-        for i, ch_base in enumerate(['Ch1', 'Ch2', 'Ch3', 'Ch4']):
-            ch_norm = f'{ch_base}_norm'
-            ch_raw = f'{ch_base}_raw'
-            
-            if ch_norm in self.fnirs_channels and len(self.fnirs_channels[ch_norm]) > 0:
-                norm_data = np.array(list(self.fnirs_channels[ch_norm])[-100:])
-                raw_data = np.array(list(self.fnirs_channels[ch_raw])[-100:])
-                
-                self.axes['info'].text(0.15, y_pos, f'{ch_base}:', fontsize=9,
-                                     color=self.fnirs_colors[ch_base],
-                                     transform=self.axes['info'].transAxes)
-                self.axes['info'].text(0.3, y_pos, f'{np.mean(norm_data):.3f}',
-                                     fontsize=8, color='white',
-                                     transform=self.axes['info'].transAxes)
-                self.axes['info'].text(0.5, y_pos, f'({np.mean(raw_data):.1f})',
-                                     fontsize=8, color='#aaaaaa',
-                                     transform=self.axes['info'].transAxes)
-                y_pos -= 0.035
-        
         # System stats
         y_pos -= 0.06
         self.axes['info'].text(0.1, y_pos, 'System:', fontsize=10,
@@ -1810,69 +1262,31 @@ class MuseAthenaVisualizer:
                              transform=self.axes['info'].transAxes)
         y_pos -= 0.05
         
-        self.axes['info'].text(0.15, y_pos, 'Packets:', fontsize=9,
-                             color='white',
-                             transform=self.axes['info'].transAxes)
-        self.axes['info'].text(0.4, y_pos, f'{self.packet_count}',
-                             fontsize=9, color='white',
-                             transform=self.axes['info'].transAxes)
-        y_pos -= 0.04
+        stats = [
+            ('Packets:', self.packet_count),
+            ('EEG:', self.eeg_packet_count),
+            ('fNIRS:', self.fnirs_packet_count)
+        ]
         
-        self.axes['info'].text(0.15, y_pos, 'EEG:', fontsize=9,
-                             color='white',
-                             transform=self.axes['info'].transAxes)
-        self.axes['info'].text(0.4, y_pos, f'{self.eeg_packet_count}',
-                             fontsize=9, color='#4ECDC4',
-                             transform=self.axes['info'].transAxes)
-        y_pos -= 0.04
-        
-        self.axes['info'].text(0.15, y_pos, 'fNIRS:', fontsize=9,
-                             color='white',
-                             transform=self.axes['info'].transAxes)
-        self.axes['info'].text(0.4, y_pos, f'{self.fnirs_packet_count}',
-                             fontsize=9, color='#E74C3C',
-                             transform=self.axes['info'].transAxes)
+        for label, value in stats:
+            self.axes['info'].text(0.15, y_pos, label, fontsize=9, color='white',
+                                 transform=self.axes['info'].transAxes)
+            self.axes['info'].text(0.4, y_pos, f'{value}', fontsize=9, 
+                                 color='#4ECDC4' if 'EEG' in label else '#E74C3C' if 'fNIRS' in label else 'white',
+                                 transform=self.axes['info'].transAxes)
+            y_pos -= 0.04
     
     def start(self):
         """Start the visualizer"""
         print("\n" + "="*60)
-        print("   MUSE S ATHENA - CONFUSION DETECTION WITH CLICK TRACKING")
+        print("   MUSE S ATHENA - CONFUSION DETECTION WITH TEXT SELECTION")
         print("="*60)
         print(f"\n📡 Listening for OSC data on UDP port {self.port}")
-        print("\n👁 WORD TRACKING MODE ACTIVE")
-        print("\n🖱️ CONFUSION MARKERS (use in teleprompter window):")
-        print("  C = Toggle labeling mode (pauses data collection)")
-        print("  During labeling: LEFT-CLICK = word confusion, RIGHT-CLICK = sentence confusion")
-        print("  '1','2','3' = Optional keyboard markers")
-        
-        print("\n📖 TELEPROMPTER CONTROLS:")
-        print("  ↑/↓ = Scroll text up/down")
-        print("  ←/→ = Previous/Next text passage")
-        print("  Space = Start/Stop recording")
-        print("  +/- = Increase/decrease font size")
-        print("  Cursor tracks which word you're reading")
-        
-        print("\n🖥️ VISUALIZER CONTROLS:")
-        print("  '+'/'-' = Increase/decrease time window")
-        print("  'r' = Reset buffers")
-        print("  'q' = Quit (saves data if recording)")
-        
-        print("\n📊 DATA COLLECTION:")
-        print("  1. Teleprompter window will open automatically")
-        print("  2. Click 'Begin Recording' or press Space to start")
-        print("  3. Read the displayed text carefully (data collection active)")
-        print("  4. When done reading, press 'C' to enter labeling mode")
-        print("  5. In labeling mode: LEFT-CLICK words, RIGHT-CLICK sentences that confused you")
-        print("  6. Press 'C' again to exit labeling and resume reading")
-        print("  7. Click 'Stop Recording' to save data")
-        print("  8. Data auto-saves on exit if recording")
-        
-        print("\n💾 DATA FORMAT:")
-        print("  • EEG: 4 channels (TP9, AF7, AF8, TP10)")
-        print("  • fNIRS: 8 values (4 normalized + 4 raw)")
-        print("  • Events: Timestamped confusion markers with clicked words")
-        print("  • Words: Current word under cursor for each sample")
-        print("  • Text: Which passage was being read")
+        print("\n🖱️ IMPROVED SELECTION SYSTEM:")
+        print("  • LEFT-DRAG: Select multi-word phrases that confuse you")
+        print("  • RIGHT-CLICK: Mark entire sentence as confusing")
+        print("  • C: Toggle between reading and labeling modes")
+        print("\n📊 Data saves with full text selections for better ML training")
         
         # Start UDP receiver
         try:
@@ -1892,14 +1306,12 @@ class MuseAthenaVisualizer:
         # Setup visualization
         self.setup_visualization()
         
-        # Create and open teleprompter window
+        # Create teleprompter
         print("\n🖥️ Opening teleprompter window...")
         self.teleprompter = TeleprompterWindow(self)
-        
-        # Start teleprompter update loop
         self.teleprompter.update_loop()
         
-        # Keyboard shortcuts for main window
+        # Keyboard shortcuts
         def on_key(event):
             if event.key == 'q':
                 print("\nQuitting...")
@@ -1908,14 +1320,13 @@ class MuseAthenaVisualizer:
                 self.cleanup_on_exit()
                 plt.close('all')
                 self.stop()
-            elif event.key == '+' or event.key == '=':
+            elif event.key in ['+', '=']:
                 self.window_duration = min(self.window_duration + 2, 30)
                 print(f"Window duration: {self.window_duration}s")
             elif event.key == '-':
                 self.window_duration = max(self.window_duration - 2, 2)
                 print(f"Window duration: {self.window_duration}s")
             elif event.key == 'r':
-                # Reset buffers
                 with self.lock:
                     for ch in self.eeg_channels.values():
                         ch.clear()
@@ -1927,17 +1338,10 @@ class MuseAthenaVisualizer:
                         ch.clear()
                     self.timestamps.clear()
                 print("Buffers reset")
-            # Legacy keyboard shortcuts (optional)
-            elif event.key == '1':
-                self.record_event('marker_1', self.current_word)
-            elif event.key == '2':
-                self.record_event('marker_2', self.current_word)
-            elif event.key == '3':
-                self.record_event('marker_3', self.current_word)
         
         self.fig.canvas.mpl_connect('key_press_event', on_key)
         
-        # Handle window close event
+        # Close handler
         def on_close(event):
             if self.teleprompter and self.teleprompter.active:
                 self.teleprompter.on_close()
@@ -1955,7 +1359,6 @@ class MuseAthenaVisualizer:
         
         print("\n✅ Visualization started!")
         print("🖥️ Teleprompter window should be open - focus it to use controls")
-        print("First 5 EEG and fNIRS packets will be printed for verification.")
         print("\n" + "="*60)
         
         try:
@@ -1983,26 +1386,18 @@ class MuseAthenaVisualizer:
         if self.socket:
             self.socket.close()
         
-        # Close teleprompter if still open
         if self.teleprompter and self.teleprompter.active:
             self.teleprompter.on_close()
         
         print(f"\n{'='*50}")
         print(f"VISUALIZER STOPPED")
-        print(f"Total packets received: {self.packet_count}")
-        print(f"EEG packets: {self.eeg_packet_count}")
-        print(f"fNIRS packets: {self.fnirs_packet_count}")
+        print(f"Total packets: {self.packet_count}")
+        print(f"EEG: {self.eeg_packet_count}, fNIRS: {self.fnirs_packet_count}")
         print(f"{'='*50}\n")
 
 
 if __name__ == "__main__":
-    # Create and start visualizer
-    visualizer = MuseAthenaVisualizer(
-        port=8052,
-        buffer_size=2000,
-        window_duration=10
-    )
-    
+    visualizer = MuseAthenaVisualizer(port=8052, buffer_size=2000, window_duration=10)
     try:
         visualizer.start()
     except Exception as e:

@@ -59,9 +59,13 @@ class ReadingSegmentDetector:
     
     def __init__(self, sample_rate=256):
         self.sample_rate = sample_rate
+        self.pre_event_offset = 2.0  # Should match the confusion detector offset
         
-    def detect_reading_segments(self, eeg_data, motion_data, event_timestamps):
+    def detect_reading_segments(self, eeg_data, motion_data, event_timestamps, pre_event_offset=2.0):
         """Identify periods of active reading vs labeling/breaks"""
+        # Store pre_event_offset
+        self.pre_event_offset = pre_event_offset
+        
         # Calculate motion energy in sliding windows
         window_size = int(0.5 * self.sample_rate)  # 0.5 second windows
         motion_energy = []
@@ -72,25 +76,36 @@ class ReadingSegmentDetector:
             motion_energy.append(energy)
         
         motion_energy = np.array(motion_energy)
-        motion_threshold = np.percentile(motion_energy, 75)  # High motion = likely clicking/labeling
+        motion_threshold = np.percentile(motion_energy, 85)  # Increased threshold - less sensitive
         
-        # Create reading mask
+        # Create reading mask - start with everything as reading
         reading_mask = np.ones(len(motion_data), dtype=bool)
         
-        # Mark high motion periods as non-reading
+        # Mark high motion periods as non-reading (but be less aggressive)
         for i, energy in enumerate(motion_energy):
             if energy > motion_threshold:
                 start = i * (window_size // 2)
                 end = min(start + window_size, len(reading_mask))
                 reading_mask[start:end] = False
         
-        # Mark periods around events as non-reading (labeling time)
+        # For confusion analysis, we want to preserve the pre-event data
+        # Only mark the period AFTER the event as non-reading (when they're clicking)
         for event_ts in event_timestamps:
             event_idx = np.argmin(np.abs(self.timestamps - event_ts))
-            # Mark 5 seconds before and after as labeling period
-            start = max(0, event_idx - int(5 * self.sample_rate))
-            end = min(len(reading_mask), event_idx + int(5 * self.sample_rate))
+            # Only mark 1 second before to 3 seconds after as labeling
+            # This preserves the confusion window (2-3 seconds before event)
+            start = max(0, event_idx - int(1 * self.sample_rate))
+            end = min(len(reading_mask), event_idx + int(3 * self.sample_rate))
             reading_mask[start:end] = False
+        
+        # Debug: print reading statistics around events
+        print(f"\nReading mask analysis:")
+        for i, event_ts in enumerate(event_timestamps[:5]):  # First 5 events
+            event_idx = np.argmin(np.abs(self.timestamps - event_ts))
+            # Check reading status at confusion window
+            confusion_idx = event_idx - int(pre_event_offset * self.sample_rate)
+            if 0 <= confusion_idx < len(reading_mask):
+                print(f"  Event {i}: Reading at confusion window = {reading_mask[confusion_idx]}")
         
         return reading_mask
 
@@ -565,9 +580,10 @@ class WordConfusionDetectorNN:
         print(f"  fNIRS shape: {self.fnirs_data.shape}")
         print(f"  Events: {len(self.event_timestamps)}")
         
-    def create_dataset(self):
+    def create_dataset(self, use_reading_mask=False):
         """Create training dataset from confusion events with improved baseline selection"""
         print("\nCreating dataset from confusion events...")
+        print(f"Reading mask filtering: {'ENABLED' if use_reading_mask else 'DISABLED'}")
         
         if len(self.event_timestamps) == 0:
             raise ValueError("No event data found in the loaded files!")
@@ -575,7 +591,8 @@ class WordConfusionDetectorNN:
         # Detect reading segments
         print("Detecting reading vs non-reading segments...")
         self.reading_mask = self.segment_detector.detect_reading_segments(
-            self.eeg_data, self.motion_data, self.event_timestamps
+            self.eeg_data, self.motion_data, self.event_timestamps, 
+            pre_event_offset=self.pre_event_offset
         )
         
         reading_ratio = np.sum(self.reading_mask) / len(self.reading_mask)
@@ -642,8 +659,14 @@ class WordConfusionDetectorNN:
         # Track feature names
         feature_names_list = []
         
+        # Debug counters
+        skipped_not_reading = 0
+        skipped_short_window = 0
+        skipped_out_of_bounds = 0
+        
         # 1. Create confusion samples
-        for group in confusion_groups:
+        print("Creating confusion samples...")
+        for group_idx, group in enumerate(confusion_groups):
             # Use the timestamp of the first event in the group (after offset adjustment)
             center_event = group[0]  # Use first instead of middle
             ts = center_event['timestamp']
@@ -651,8 +674,14 @@ class WordConfusionDetectorNN:
             # Find closest sample index
             idx = np.argmin(np.abs(self.timestamps - ts))
             
+            # Check if index is valid
+            if idx < self.window_samples // 2 or idx >= len(self.timestamps) - self.window_samples // 2:
+                skipped_out_of_bounds += 1
+                continue
+            
             # Check if this is during reading
             if not self.reading_mask[idx]:
+                skipped_not_reading += 1
                 continue  # Skip if not during active reading
             
             # Extract window
@@ -661,6 +690,7 @@ class WordConfusionDetectorNN:
             end_idx = min(len(self.timestamps), idx + half_window)
             
             if end_idx - start_idx < self.window_samples * 0.8:  # Need at least 80% of window
+                skipped_short_window += 1
                 continue
             
             # Extract signals
@@ -702,6 +732,11 @@ class WordConfusionDetectorNN:
             sample_file_indices.append(self.file_indices[idx])
             sample_weights.append(1.0)  # Normal weight for confusion samples
         
+        print(f"Created {len(labels)} confusion samples")
+        print(f"  Skipped {skipped_out_of_bounds} (out of bounds)")
+        print(f"  Skipped {skipped_not_reading} (not reading)")
+        print(f"  Skipped {skipped_short_window} (short window)")
+        
         # Store feature names
         self.feature_names = feature_names_list
         
@@ -716,8 +751,8 @@ class WordConfusionDetectorNN:
         min_distance_from_events = 10.0  # Increased from 5.0 seconds
         
         for i in range(self.window_samples, len(self.timestamps) - self.window_samples):
-            # Must be during active reading
-            if not self.reading_mask[i]:
+            # Must be during active reading (only if reading mask is enabled)
+            if use_reading_mask and not self.reading_mask[i]:
                 continue
             
             # Check distance from all confusion events
@@ -758,7 +793,7 @@ class WordConfusionDetectorNN:
             # Sample realistic word complexity
             baseline_word_features = self.complexity_analyzer.sample_baseline_complexity()
             
-            feat_vec, _ = self.extract_features(eeg_win, fnirs_win, baseline_word_features, return_names=False)
+            feat_vec = self.extract_features(eeg_win, fnirs_win, baseline_word_features, return_names=False)
             
             raw_signals['eeg'].append(eeg_win)
             raw_signals['fnirs'].append(fnirs_win)
@@ -769,6 +804,8 @@ class WordConfusionDetectorNN:
             sample_weights.append(1.5)  # Higher weight for baseline to balance
             
             baseline_added += 1
+        
+        print(f"Added {baseline_added} baseline samples")
         
         # Convert to arrays
         for key in raw_signals:
@@ -815,13 +852,19 @@ class WordConfusionDetectorNN:
                                     fs=self.sample_rate, output='sos')
             self.eeg_filtered = signal.sosfiltfilt(sos_notch, self.eeg_filtered, axis=0)
         
-        # fNIRS preprocessing with proper filtering for hemodynamic response
-        # Use a low-pass filter appropriate for fNIRS
+        # fNIRS preprocessing - FIXED to use all 8 channels
+        # First check how many channels we have
+        n_fnirs_channels = self.fnirs_data.shape[1]
+        print(f"  Processing {n_fnirs_channels} fNIRS channels")
+        
+        # Use all available fNIRS channels
         sos_fnirs = signal.butter(4, 0.5, btype='low', fs=self.sample_rate, output='sos')
-        self.fnirs_filtered = signal.sosfiltfilt(sos_fnirs, self.fnirs_data[:, :4], axis=0)
+        self.fnirs_filtered = signal.sosfiltfilt(sos_fnirs, self.fnirs_data, axis=0)
         self.fnirs_filtered = signal.detrend(self.fnirs_filtered, axis=0)
         
         print("Signal preprocessing complete")
+        print(f"  EEG filtered shape: {self.eeg_filtered.shape}")
+        print(f"  fNIRS filtered shape: {self.fnirs_filtered.shape}")
         
     def extract_features(self, eeg_window, fnirs_window, word_complexity, return_names=False):
         """Extract features including word complexity"""
@@ -878,8 +921,16 @@ class WordConfusionDetectorNN:
             if return_names:
                 names.append(f'eeg_{ch_name}_spectral_entropy')
         
-        # fNIRS features
-        fnirs_channels = ['AF7_O2', 'AF8_O2', 'AF7_HbR', 'AF8_HbR']
+        # fNIRS features - adapt to actual number of channels
+        n_fnirs_channels = fnirs_window.shape[0]
+        
+        # Define channel names based on actual number of channels
+        if n_fnirs_channels >= 8:
+            fnirs_channels = ['AF7_O2', 'AF8_O2', 'AF7_HbR', 'AF8_HbR', 
+                            'FP1_O2', 'FP2_O2', 'FP1_HbR', 'FP2_HbR'][:n_fnirs_channels]
+        else:
+            fnirs_channels = [f'fnirs_ch{i}' for i in range(n_fnirs_channels)]
+        
         for ch_idx, ch_name in enumerate(fnirs_channels):
             ch_data = fnirs_window[ch_idx]
             
@@ -1574,6 +1625,11 @@ def main():
         default='.',
         help='Directory to save outputs'
     )
+    parser.add_argument(
+        '--no-reading-mask',
+        action='store_true',
+        help='Disable reading mask filtering (useful for debugging)'
+    )
     
     args = parser.parse_args()
     
@@ -1601,7 +1657,9 @@ def main():
     
     # Create dataset
     try:
-        raw_signals, features, labels = detector.create_dataset()
+        raw_signals, features, labels = detector.create_dataset(
+            use_reading_mask=not args.no_reading_mask
+        )
     except ValueError as e:
         print(f"\nError: {e}")
         sys.exit(1)

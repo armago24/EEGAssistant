@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """
+Neural.py
 Neural Network-based Word Confusion Detector for EEG/fNIRS Data
 Fixed version addressing data leakage and adding feature importance visualization
 """

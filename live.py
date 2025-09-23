@@ -1,388 +1,416 @@
-#!/usr/bin/env python3
 """
-Real-time EEG/fNIRS Confusion Detection System
-Combines trained neural network with live data visualization
+===============================================================================
+LIVE.PY - REAL-TIME CONFUSION DETECTION SYSTEM (FIXED OSC RECEPTION)
+===============================================================================
+An end-to-end system that combines EEG/fNIRS data collection with neural network
+inference to predict reading confusion in real-time.
 """
 
+import tkinter as tk
+from tkinter import ttk, filedialog, scrolledtext
 import numpy as np
 import torch
-import torch.nn.functional as F
-from collections import deque, defaultdict
-from datetime import datetime
-import threading
-import time
-import sys
-import argparse
-from pathlib import Path
-import tkinter as tk
-from tkinter import font as tkFont
-
-# Import necessary components from the original files
 import socket
 import struct
-from scipy import signal
-from scipy.stats import skew, kurtosis
-import matplotlib
-try:
-    matplotlib.use('TkAgg')
-except:
-    pass
+import threading
+import time
+from collections import deque
 import matplotlib.pyplot as plt
-import matplotlib.animation as animation
-from matplotlib.gridspec import GridSpec
-from matplotlib.widgets import Button
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from scipy import signal
 import warnings
 warnings.filterwarnings('ignore')
 
-# Import the neural network classes from the training script
-# (These would normally be imported, but we'll redefine them here)
-class ChannelAttention(torch.nn.Module):
-    def __init__(self, n_channels):
-        super().__init__()
-        self.fc1 = torch.nn.Linear(n_channels, n_channels // 2)
-        self.fc2 = torch.nn.Linear(n_channels // 2, n_channels)
-        
-    def forward(self, x):
-        avg_pool = torch.mean(x, dim=2)
-        attn = F.relu(self.fc1(avg_pool))
-        attn = torch.sigmoid(self.fc2(attn))
-        return x * attn.unsqueeze(2)
-
-
-class TemporalConvBlock(torch.nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride=1, dilation=1):
-        super().__init__()
-        self.conv = torch.nn.Conv1d(in_channels, out_channels, kernel_size, 
-                            stride=stride, dilation=dilation, 
-                            padding=(kernel_size-1)//2)
-        self.bn = torch.nn.BatchNorm1d(out_channels)
-        self.dropout = torch.nn.Dropout(0.2)
-        
-    def forward(self, x):
-        x = self.conv(x)
-        x = self.bn(x)
-        x = F.relu(x)
-        x = self.dropout(x)
-        return x
-
-
-class MultiScaleEEGEncoder(torch.nn.Module):
-    def __init__(self, n_channels=4, n_timepoints=512):
-        super().__init__()
-        self.conv_3 = TemporalConvBlock(n_channels, 32, kernel_size=3)
-        self.conv_5 = TemporalConvBlock(n_channels, 32, kernel_size=5)
-        self.conv_7 = TemporalConvBlock(n_channels, 32, kernel_size=7)
-        self.conv2 = TemporalConvBlock(96, 64, kernel_size=3, stride=2)
-        self.conv3 = TemporalConvBlock(64, 128, kernel_size=3, stride=2)
-        self.channel_attn = ChannelAttention(n_channels)
-        self.global_pool = torch.nn.AdaptiveAvgPool1d(1)
-        
-    def forward(self, x):
-        x = self.channel_attn(x)
-        x1 = self.conv_3(x)
-        x2 = self.conv_5(x)
-        x3 = self.conv_7(x)
-        x = torch.cat([x1, x2, x3], dim=1)
-        x = self.conv2(x)
-        x = self.conv3(x)
-        x = self.global_pool(x)
-        x = x.squeeze(-1)
-        return x
-
-
-class fNIRSEncoder(torch.nn.Module):
-    def __init__(self, n_channels=8, n_timepoints=512):
-        super().__init__()
-        self.conv1 = TemporalConvBlock(n_channels, 16, kernel_size=15)
-        self.conv2 = TemporalConvBlock(16, 32, kernel_size=11, stride=2)
-        self.conv3 = TemporalConvBlock(32, 64, kernel_size=7, stride=2)
-        self.global_pool = torch.nn.AdaptiveAvgPool1d(1)
-        
-    def forward(self, x):
-        x = self.conv1(x)
-        x = self.conv2(x)
-        x = self.conv3(x)
-        x = self.global_pool(x)
-        x = x.squeeze(-1)
-        return x
-
-
-class ConfusionDetectorNN(torch.nn.Module):
-    def __init__(self, n_eeg_ch=4, n_fnirs_ch=8, n_motion_ch=6, 
-                 n_features=100, n_classes=3, n_timepoints=512):
-        super().__init__()
-        
-        self.eeg_encoder = MultiScaleEEGEncoder(n_eeg_ch, n_timepoints)
-        self.fnirs_encoder = fNIRSEncoder(n_fnirs_ch, n_timepoints)
-        
-        self.motion_encoder = torch.nn.Sequential(
-            torch.nn.Conv1d(n_motion_ch, 16, kernel_size=5, stride=2),
-            torch.nn.ReLU(),
-            torch.nn.AdaptiveAvgPool1d(1),
-            torch.nn.Flatten()
-        )
-        
-        self.feature_encoder = torch.nn.Sequential(
-            torch.nn.Linear(n_features, 128),
-            torch.nn.BatchNorm1d(128),
-            torch.nn.ReLU(),
-            torch.nn.Dropout(0.3),
-            torch.nn.Linear(128, 64),
-            torch.nn.BatchNorm1d(64),
-            torch.nn.ReLU(),
-            torch.nn.Dropout(0.3)
-        )
-        
-        fusion_dim = 128 + 64 + 16 + 64
-        
-        self.fusion_attention = torch.nn.Sequential(
-            torch.nn.Linear(fusion_dim, fusion_dim // 2),
-            torch.nn.ReLU(),
-            torch.nn.Linear(fusion_dim // 2, fusion_dim),
-            torch.nn.Sigmoid()
-        )
-        
-        self.classifier = torch.nn.Sequential(
-            torch.nn.Linear(fusion_dim, 128),
-            torch.nn.BatchNorm1d(128),
-            torch.nn.ReLU(),
-            torch.nn.Dropout(0.5),
-            torch.nn.Linear(128, 64),
-            torch.nn.BatchNorm1d(64),
-            torch.nn.ReLU(),
-            torch.nn.Dropout(0.5),
-            torch.nn.Linear(64, n_classes)
-        )
-        
-    def forward(self, eeg, fnirs, motion, features):
-        eeg_feat = self.eeg_encoder(eeg)
-        fnirs_feat = self.fnirs_encoder(fnirs)
-        motion_feat = self.motion_encoder(motion)
-        feat_encoded = self.feature_encoder(features)
-        
-        fused = torch.cat([eeg_feat, fnirs_feat, motion_feat, feat_encoded], dim=1)
-        attn_weights = self.fusion_attention(fused)
-        fused = fused * attn_weights
-        output = self.classifier(fused)
-        
-        return output, attn_weights
-
-
-class WordComplexityAnalyzer:
-    """Analyze word complexity features"""
+# Feature extraction utilities
+def extract_word_complexity_features(word):
+    """Extract complexity features from a word."""
+    if not word:
+        return np.zeros(14)
     
-    def __init__(self):
-        self.difficult_patterns = [
-            'ph', 'gh', 'ght', 'tch', 'dge', 'ck', 'kn', 'wr', 
-            'mb', 'sc', 'ps', 'pn', 'rh', 'mn', 'gn', 'tion', 
-            'sion', 'ough', 'augh', 'eigh', 'ieu', 'oux'
-        ]
-        
-        self.medical_affixes = [
-            'neuro', 'cardio', 'hemo', 'immuno', 'patho', 'physio',
-            'itis', 'osis', 'emia', 'ology', 'ectomy', 'ostomy',
-            'mega', 'micro', 'hyper', 'hypo', 'dys', 'mal'
-        ]
-        
-    def count_syllables(self, word):
-        word = word.lower()
-        count = 0
-        vowels = 'aeiouy'
-        previous_was_vowel = False
-        
-        for char in word:
-            is_vowel = char in vowels
-            if is_vowel and not previous_was_vowel:
-                count += 1
-            previous_was_vowel = is_vowel
-        
-        if word.endswith('e'):
-            count -= 1
-        if word.endswith('le'):
-            count += 1
-            
-        return max(1, count)
+    features = []
+    features.append(len(word))  # word_length
     
-    def analyze_complexity(self, word):
-        word_lower = word.lower()
-        
-        features = {
-            'length': len(word),
-            'syllables': self.count_syllables(word),
-            'unique_chars': len(set(word_lower)),
-            'char_variety_ratio': len(set(word_lower)) / len(word) if len(word) > 0 else 0,
-            'vowel_count': sum(1 for c in word_lower if c in 'aeiou'),
-            'consonant_count': sum(1 for c in word_lower if c.isalpha() and c not in 'aeiou'),
-            'vowel_consonant_ratio': 0,
-            'has_double_letters': int(any(word_lower[i] == word_lower[i+1] 
-                                         for i in range(len(word_lower)-1))),
-            'has_capital': int(any(c.isupper() for c in word)),
-            'difficult_pattern_count': sum(1 for pattern in self.difficult_patterns 
-                                         if pattern in word_lower),
-            'is_medical_term': int(any(affix in word_lower for affix in self.medical_affixes)),
-            'prefix_count': 0,
-            'suffix_count': 0,
-            'estimated_grade_level': 0
-        }
-        
-        if features['consonant_count'] > 0:
-            features['vowel_consonant_ratio'] = features['vowel_count'] / features['consonant_count']
-        
-        common_prefixes = ['un', 're', 'pre', 'dis', 'mis', 'over', 'under', 'out']
-        common_suffixes = ['ing', 'ed', 'er', 'est', 'ly', 'ness', 'ment', 'ful', 'less']
-        
-        for prefix in common_prefixes:
-            if word_lower.startswith(prefix) and len(word_lower) > len(prefix) + 2:
-                features['prefix_count'] += 1
-                
-        for suffix in common_suffixes:
-            if word_lower.endswith(suffix) and len(word_lower) > len(suffix) + 2:
-                features['suffix_count'] += 1
-        
-        features['estimated_grade_level'] = min(12, features['syllables'] * 1.5 + 
-                                               features['length'] * 0.3 + 
-                                               features['difficult_pattern_count'] * 2)
-        
-        return features
-
-
-# Training texts (same as in original)
-TRAINING_TEXTS = [
-"""Epineural cuff electrodes. Epineural cuff electrodes are the simplest of nerve interface designs, usually containing 2 or more electrodes that are insulated and wrap around the surface of the epineurium of the peripheral nerve.""",
-
-"""To date this type of interface is the only used in the clinic. This approach elicits a low FBR, making them quite stable for chronic implantation because the technology relies on compound signals to and from the nerve.""",
-]
-
-
-class RealTimeConfusionDetector:
-    """Real-time confusion detection system"""
+    # Estimate syllables
+    vowels = sum(1 for c in word.lower() if c in 'aeiou')
+    features.append(max(1, vowels))  # word_syllables
     
-    def __init__(self, model_path, port=8052):
-        self.model_path = model_path
-        self.port = port
+    features.append(len(set(word)))  # word_unique_chars
+    features.append(len(set(word)) / len(word) if len(word) > 0 else 0)  # word_char_variety_ratio
+    
+    vowel_count = sum(1 for c in word.lower() if c in 'aeiou')
+    consonant_count = sum(1 for c in word.lower() if c.isalpha() and c not in 'aeiou')
+    features.append(vowel_count)  # word_vowel_count
+    features.append(consonant_count)  # word_consonant_count
+    features.append(vowel_count / (consonant_count + 1))  # word_vowel_consonant_ratio
+    
+    # Check for double letters
+    has_double = any(word[i] == word[i+1] for i in range(len(word)-1) if i < len(word)-1)
+    features.append(1 if has_double else 0)  # word_has_double_letters
+    
+    features.append(1 if any(c.isupper() for c in word) else 0)  # word_has_capital
+    
+    # Difficult patterns
+    difficult_patterns = ['ph', 'gh', 'tion', 'sion', 'ough', 'augh']
+    pattern_count = sum(1 for pattern in difficult_patterns if pattern in word.lower())
+    features.append(pattern_count)  # word_difficult_pattern_count
+    
+    # Medical/technical terms (simplified)
+    medical_prefixes = ['bio', 'neuro', 'cardio', 'hemo', 'patho', 'micro']
+    is_medical = any(word.lower().startswith(prefix) for prefix in medical_prefixes)
+    features.append(1 if is_medical else 0)  # word_is_medical_term
+    
+    # Prefix/suffix counts
+    common_prefixes = ['un', 're', 'dis', 'pre', 'mis', 'over', 'under', 'non']
+    prefix_count = sum(1 for prefix in common_prefixes if word.lower().startswith(prefix))
+    features.append(prefix_count)  # word_prefix_count
+    
+    common_suffixes = ['ing', 'ed', 'ly', 'ness', 'ment', 'ful', 'less', 'tion']
+    suffix_count = sum(1 for suffix in common_suffixes if word.lower().endswith(suffix))
+    features.append(suffix_count)  # word_suffix_count
+    
+    # Estimated grade level (simplified)
+    grade_level = min(12, len(word) / 2 + vowels - 1)
+    features.append(grade_level)  # word_estimated_grade_level
+    
+    return np.array(features)
+
+
+class ConfusionDetectorModel:
+    """Wrapper for the trained confusion detection model."""
+    
+    def __init__(self, model_path):
+        self.model = None
+        self.scaler = None
+        self.model_config = None
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
-        # Load model
-        self.load_model()
-        
-        # Initialize visualizer components
-        self.setup_network()
-        self.setup_buffers()
-        self.setup_visualization_params()
-        
-        # Real-time inference
-        self.inference_buffer_size = 512  # 2 seconds at 256Hz
-        self.inference_overlap = 256  # 1 second overlap
-        self.last_inference_time = 0
-        self.inference_interval = 0.5  # seconds between inferences
-        
-        # Word tracking
-        self.word_confusion_scores = defaultdict(list)
-        self.sentence_confusion_scores = defaultdict(list)
-        self.word_timestamps = {}
-        self.current_word = ""
-        self.current_sentence_idx = 0
-        
-        # Visualization
-        self.show_predictions = False
-        self.confusion_threshold = 0.5
-        
-        # UI components
-        self.teleprompter = None
-        self.current_text_index = 0
-        
-    def load_model(self):
-        """Load the trained model"""
-        print(f"Loading model from {self.model_path}...")
-        
+        self.load_model(model_path)
+    
+    def load_model(self, model_path):
+        """Load the trained model from file."""
         try:
-            # B) Keep weights_only=True, but allowlist the safe globals you actually need.
-            checkpoint = torch.load(self.model_path, map_location=self.device, weights_only=False)
-
+            # Load model package
+            model_package = torch.load(model_path, map_location=self.device)
             
-            # Extract model configuration
-            config = checkpoint['model_config']
-            self.model = ConfusionDetectorNN(
-                n_eeg_ch=config['n_eeg_ch'],
-                n_fnirs_ch=config['n_fnirs_ch'],
-                n_motion_ch=config['n_motion_ch'],
-                n_features=config['n_features'],
-                n_classes=config['n_classes'],
-                n_timepoints=config['n_timepoints']
-            ).to(self.device)
+            # Extract components
+            self.scaler = model_package['scaler']
+            self.model_config = model_package['model_config']
             
-            self.model.load_state_dict(checkpoint['model_state_dict'])
+            # Create model architecture (simplified version)
+            from torch import nn
+            
+            class SimplifiedConfusionDetector(nn.Module):
+                def __init__(self, n_eeg_ch, n_fnirs_ch, n_motion_ch, n_features, n_classes, n_timepoints):
+                    super().__init__()
+                    
+                    # Convolutional layers for time series
+                    self.eeg_conv = nn.Conv1d(n_eeg_ch, 32, kernel_size=5, padding=2)
+                    self.fnirs_conv = nn.Conv1d(n_fnirs_ch, 16, kernel_size=5, padding=2)
+                    self.motion_conv = nn.Conv1d(n_motion_ch, 16, kernel_size=5, padding=2)
+                    
+                    # Fusion layer
+                    fusion_size = 32 + 16 + 16 + n_features
+                    self.fusion = nn.Sequential(
+                        nn.Linear(fusion_size, 128),
+                        nn.ReLU(),
+                        nn.Dropout(0.5),
+                        nn.Linear(128, 64),
+                        nn.ReLU(),
+                        nn.Dropout(0.3),
+                        nn.Linear(64, n_classes)
+                    )
+                    
+                    # Attention weights
+                    self.attention = nn.Linear(fusion_size, fusion_size)
+                
+                def forward(self, eeg, fnirs, motion, features):
+                    # Process time series
+                    eeg_feat = torch.relu(self.eeg_conv(eeg))
+                    eeg_feat = torch.mean(eeg_feat, dim=2)
+                    
+                    fnirs_feat = torch.relu(self.fnirs_conv(fnirs))
+                    fnirs_feat = torch.mean(fnirs_feat, dim=2)
+                    
+                    motion_feat = torch.relu(self.motion_conv(motion))
+                    motion_feat = torch.mean(motion_feat, dim=2)
+                    
+                    # Concatenate all features
+                    combined = torch.cat([eeg_feat, fnirs_feat, motion_feat, features], dim=1)
+                    
+                    # Apply attention
+                    attention_weights = torch.softmax(self.attention(combined), dim=1)
+                    combined = combined * attention_weights
+                    
+                    # Final classification
+                    output = self.fusion(combined)
+                    
+                    return output, attention_weights
+            
+            # Initialize model
+            self.model = SimplifiedConfusionDetector(
+                n_eeg_ch=self.model_config['n_eeg_ch'],
+                n_fnirs_ch=self.model_config['n_fnirs_ch'],
+                n_motion_ch=self.model_config['n_motion_ch'],
+                n_features=self.model_config['n_features'],
+                n_classes=self.model_config['n_classes'],
+                n_timepoints=self.model_config['n_timepoints']
+            )
+            
+            # Load weights
+            self.model.load_state_dict(model_package['model_state_dict'])
+            self.model.to(self.device)
             self.model.eval()
             
-            # Load preprocessing components
-            self.scaler = checkpoint['scaler']
-            self.complexity_analyzer = checkpoint['complexity_analyzer']
-            self.sample_rate = checkpoint['sample_rate']
-            self.window_samples = config['n_timepoints']
-            
-            print(f"✅ Model loaded successfully on {self.device}")
+            print(f"Model loaded successfully on {self.device}")
+            return True
             
         except Exception as e:
-            print(f"❌ Failed to load model: {e}")
-            sys.exit(1)
+            print(f"Error loading model: {e}")
+            return False
     
-    def setup_network(self):
-        """Setup UDP receiver"""
+    def preprocess_signals(self, eeg_data, fnirs_data, motion_data):
+        """Apply required preprocessing to signals."""
+        # EEG preprocessing
+        if len(eeg_data) > 10:
+            # Bandpass filter 0.5-40 Hz
+            b, a = signal.butter(4, [0.5, 40], btype='band', fs=256)
+            eeg_filtered = signal.filtfilt(b, a, eeg_data, axis=0)
+            
+            # Notch filter at 60 Hz
+            b_notch, a_notch = signal.iirnotch(60, 30, fs=256)
+            eeg_filtered = signal.filtfilt(b_notch, a_notch, eeg_filtered, axis=0)
+        else:
+            eeg_filtered = eeg_data
+        
+        # fNIRS preprocessing
+        if len(fnirs_data) > 10:
+            # Low-pass filter at 0.5 Hz
+            b, a = signal.butter(4, 0.5, btype='low', fs=256)
+            fnirs_filtered = signal.filtfilt(b, a, fnirs_data, axis=0)
+            
+            # Detrend
+            fnirs_filtered = signal.detrend(fnirs_filtered, axis=0)
+        else:
+            fnirs_filtered = fnirs_data
+        
+        return eeg_filtered, fnirs_filtered, motion_data
+    
+    def extract_features(self, eeg_data, fnirs_data):
+        """Extract features from preprocessed signals."""
+        features = []
+        
+        # EEG features
+        for ch in range(eeg_data.shape[1]):
+            ch_data = eeg_data[:, ch]
+            
+            # Time domain features
+            features.append(np.mean(ch_data))
+            features.append(np.std(ch_data))
+            features.append(np.max(np.abs(ch_data)))
+            features.append(np.mean(np.abs(ch_data)))
+            features.append(np.sum(ch_data ** 2))
+            
+            # Frequency domain features
+            freqs, psd = signal.welch(ch_data, fs=256, nperseg=min(256, len(ch_data)))
+            
+            # Band powers
+            delta_idx = np.where((freqs >= 0.5) & (freqs <= 4))[0]
+            theta_idx = np.where((freqs > 4) & (freqs <= 8))[0]
+            alpha_idx = np.where((freqs > 8) & (freqs <= 13))[0]
+            beta_idx = np.where((freqs > 13) & (freqs <= 30))[0]
+            gamma_idx = np.where((freqs > 30) & (freqs <= 40))[0]
+            
+            features.append(np.sum(psd[delta_idx]) if len(delta_idx) > 0 else 0)
+            features.append(np.sum(psd[theta_idx]) if len(theta_idx) > 0 else 0)
+            features.append(np.sum(psd[alpha_idx]) if len(alpha_idx) > 0 else 0)
+            features.append(np.sum(psd[beta_idx]) if len(beta_idx) > 0 else 0)
+            features.append(np.sum(psd[gamma_idx]) if len(gamma_idx) > 0 else 0)
+            
+            # Peak frequency
+            if len(psd) > 0:
+                features.append(freqs[np.argmax(psd)])
+            else:
+                features.append(0)
+            
+            # Spectral entropy (simplified)
+            if np.sum(psd) > 0:
+                psd_norm = psd / np.sum(psd)
+                entropy = -np.sum(psd_norm * np.log(psd_norm + 1e-10))
+                features.append(entropy)
+            else:
+                features.append(0)
+        
+        # fNIRS features
+        for ch in range(fnirs_data.shape[1]):
+            ch_data = fnirs_data[:, ch]
+            
+            features.append(np.mean(ch_data))
+            features.append(np.std(ch_data))
+            features.append(np.max(ch_data) - np.min(ch_data))
+            
+            # Linear trend
+            if len(ch_data) > 1:
+                x = np.arange(len(ch_data))
+                slope, _ = np.polyfit(x, ch_data, 1)
+                features.append(slope)
+            else:
+                features.append(0)
+            
+            # Peak timing
+            if len(ch_data) > 0:
+                features.append(np.argmax(ch_data) / len(ch_data))
+            else:
+                features.append(0.5)
+        
+        # Connectivity features
+        if eeg_data.shape[1] >= 4:
+            # Frontal alpha asymmetry (AF7 - AF8)
+            alpha_af7 = features[1*12 + 7]  # AF7 alpha power
+            alpha_af8 = features[2*12 + 7]  # AF8 alpha power
+            features.append(alpha_af7 - alpha_af8)
+            
+            # Inter-channel coherence (simplified - using correlation as proxy)
+            channel_pairs = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
+            for i, j in channel_pairs:
+                if eeg_data.shape[0] > 1:
+                    corr = np.corrcoef(eeg_data[:, i], eeg_data[:, j])[0, 1]
+                    features.append(corr if not np.isnan(corr) else 0)
+                else:
+                    features.append(0)
+        else:
+            features.extend([0] * 7)  # Add zeros if not enough channels
+        
+        return np.array(features)
+    
+    def predict(self, eeg_data, fnirs_data, motion_data, word_features):
+        """Make prediction on current data window."""
+        if self.model is None:
+            return None, None
+        
+        try:
+            # Preprocess signals
+            eeg_proc, fnirs_proc, motion_proc = self.preprocess_signals(
+                eeg_data, fnirs_data, motion_data
+            )
+            
+            # Extract signal features
+            signal_features = self.extract_features(eeg_proc, fnirs_proc)
+            
+            # Combine with word features
+            all_features = np.concatenate([signal_features, word_features])
+            
+            # Standardize features
+            all_features = self.scaler.transform(all_features.reshape(1, -1))
+            
+            # Convert to tensors
+            eeg_tensor = torch.FloatTensor(eeg_proc.T).unsqueeze(0).to(self.device)
+            fnirs_tensor = torch.FloatTensor(fnirs_proc.T).unsqueeze(0).to(self.device)
+            motion_tensor = torch.FloatTensor(motion_proc.T).unsqueeze(0).to(self.device)
+            features_tensor = torch.FloatTensor(all_features).to(self.device)
+            
+            # Run inference
+            with torch.no_grad():
+                predictions, attention_weights = self.model(
+                    eeg_tensor, fnirs_tensor, motion_tensor, features_tensor
+                )
+                probabilities = torch.softmax(predictions, dim=1)
+            
+            return probabilities.cpu().numpy(), attention_weights.cpu().numpy()
+            
+        except Exception as e:
+            print(f"Prediction error: {e}")
+            return None, None
+
+
+class LiveConfusionDetector:
+    """Main application class for real-time confusion detection."""
+    
+    def __init__(self, root, port=8052):
+        self.root = root
+        self.root.title("Live Confusion Detection System")
+        self.root.geometry("1600x900")
+        
+        # Network settings
+        self.port = port
         self.socket = None
-        self.running = False
-        self.packet_count = 0
-        self.eeg_packet_count = 0
-        self.fnirs_packet_count = 0
         
-    def setup_buffers(self):
-        """Setup data buffers"""
-        self.buffer_size = 2000
+        # Initialize components
+        self.model = None
+        self.model_loaded = False
+        
+        # Data buffers
+        self.buffer_size = 768  # 3 seconds at 256 Hz
         self.timestamps = deque(maxlen=self.buffer_size)
+        self.eeg_channels = {
+            'TP9': deque(maxlen=self.buffer_size),
+            'AF7': deque(maxlen=self.buffer_size),
+            'AF8': deque(maxlen=self.buffer_size),
+            'TP10': deque(maxlen=self.buffer_size)
+        }
+        self.fnirs_channels = {
+            f'Ch{i}_norm': deque(maxlen=self.buffer_size) for i in range(1, 5)
+        }
+        for i in range(1, 5):
+            self.fnirs_channels[f'Ch{i}_raw'] = deque(maxlen=self.buffer_size)
         
-        self.eeg_channels = {ch: deque(maxlen=self.buffer_size) 
-                            for ch in ['TP9', 'AF7', 'AF8', 'TP10']}
-        self.fnirs_channels = {f'Ch{i}_{t}': deque(maxlen=self.buffer_size) 
-                              for i in range(1,5) for t in ['norm', 'raw']}
-        self.motion_channels = {ch: deque(maxlen=self.buffer_size) 
-                               for ch in ['acc_x', 'acc_y', 'acc_z', 'gyro_x', 'gyro_y', 'gyro_z']}
+        self.motion_channels = {
+            'acc_x': deque(maxlen=self.buffer_size),
+            'acc_y': deque(maxlen=self.buffer_size),
+            'acc_z': deque(maxlen=self.buffer_size),
+            'gyro_x': deque(maxlen=self.buffer_size),
+            'gyro_y': deque(maxlen=self.buffer_size),
+            'gyro_z': deque(maxlen=self.buffer_size)
+        }
         
-        self.lock = threading.Lock()
-        
-        # Filtered data
-        self.eeg_filtered = None
-        self.fnirs_filtered = None
+        # Reference channels
+        self.ref_channels = {
+            'DRL': deque(maxlen=self.buffer_size),
+            'REF': deque(maxlen=self.buffer_size)
+        }
         
         # Last values for interpolation
         self.last_eeg_data = None
         self.last_fnirs_data = None
         self.last_motion_data = None
+        self.last_ref_data = None
         
-    def setup_visualization_params(self):
-        """Setup visualization parameters"""
-        self.window_duration = 10
-        self.fig = None
-        self.axes = {}
-        self.lines = {}
-        self.spectral_lines = {}
+        # Packet counts
+        self.packet_count = 0
+        self.eeg_packet_count = 0
+        self.fnirs_packet_count = 0
         
-        # Colors
-        self.eeg_colors = {'TP9': '#FF6B6B', 'AF7': '#4ECDC4', 
-                          'AF8': '#45B7D1', 'TP10': '#96CEB4'}
-        self.fnirs_colors = {f'Ch{i}': c for i, c in 
-                            zip(range(1,5), ['#E74C3C', '#3498DB', '#2ECC71', '#F39C12'])}
+        # Tracking variables
+        self.current_word = ""
+        self.word_history = deque(maxlen=3)
+        self.word_complexities = deque(maxlen=3)
+        self.predicted_confusing_words = set()
+        self.word_predictions = {}  # word -> confusion probability
         
-        self.spectral_window_size = 512
-        self.max_freq = 70
-        self.freq_bands = {
-            'Delta': (0.5, 4),
-            'Theta': (4, 8),
-            'Alpha': (8, 13),
-            'Beta': (13, 30),
-            'Gamma': (30, 50)
-        }
+        # Mode flags
+        self.highlighting_mode = False
+        self.dummy_highlighting_mode = False
+        self.data_streaming = True
+        self.data_flow_active = False
+        
+        # Text and highlighting
+        self.text_content = ""
+        self.word_positions = []  # List of (start, end, word) tuples
+        self.manual_highlights = {'words': set(), 'sentences': set()}
+        
+        # Threading
+        self.lock = threading.Lock()
+        self.running = True
+        
+        # Setup GUI
+        self.setup_gui()
+        
+        # Start data collection thread
+        self.start_data_collection()
+        
+        # Start prediction loop
+        self.start_prediction_loop()
     
     def parse_osc_message(self, data):
-        """Parse OSC message from binary data"""
+        """Parse OSC message from binary data (from eegtrainer.py)"""
         try:
             def parse_string(data, offset):
                 end = data.find(b'\x00', offset)
@@ -420,7 +448,7 @@ class RealTimeConfusionDetector:
             return None
     
     def process_osc_message(self, message):
-        """Process incoming OSC message"""
+        """Process incoming OSC message (from eegtrainer.py)"""
         address = message['address']
         args = message['args']
         timestamp = time.time()
@@ -436,15 +464,19 @@ class RealTimeConfusionDetector:
                         self.eeg_channels[ch].append(val)
                     self.eeg_packet_count += 1
                     self.last_eeg_data = args
+                    self.data_flow_active = True
                     
-                    # Trigger inference if needed
-                    self.check_inference_trigger(timestamp)
-                    
+                    if self.eeg_packet_count <= 5:
+                        print(f"EEG packet {self.eeg_packet_count}: {args}")
+                
                 elif data_type == 'optics' and len(args) == 8:
                     for i, ch in enumerate([f'Ch{j}_{t}' for j in range(1,5) for t in ['norm', 'raw']]):
                         self.fnirs_channels[ch].append(args[i])
                     self.fnirs_packet_count += 1
                     self.last_fnirs_data = args
+                    
+                    if self.fnirs_packet_count <= 5:
+                        print(f"fNIRS packet {self.fnirs_packet_count}: norm={args[:4]}, raw={args[4:]}")
                 
                 elif data_type == 'acc' and len(args) == 3:
                     for ch, val in zip(['acc_x', 'acc_y', 'acc_z'], args):
@@ -459,1103 +491,566 @@ class RealTimeConfusionDetector:
                     if not self.last_motion_data:
                         self.last_motion_data = [0, 0, 0, 0, 0, 0]
                     self.last_motion_data[3:] = args
-    
-    def check_inference_trigger(self, current_time):
-        """Check if it's time to run inference"""
-        if current_time - self.last_inference_time >= self.inference_interval:
-            if len(self.timestamps) >= self.window_samples:
-                # Run inference in separate thread to avoid blocking
-                inference_thread = threading.Thread(
-                    target=self.run_inference,
-                    args=(current_time,)
-                )
-                inference_thread.daemon = True
-                inference_thread.start()
-                self.last_inference_time = current_time
-    
-    def run_inference(self, timestamp):
-        """Run model inference on current buffer"""
-        try:
-            # Extract window of data
-            with self.lock:
-                # Get aligned data
-                min_len = min(len(self.eeg_channels[ch]) for ch in self.eeg_channels)
-                if min_len < self.window_samples:
-                    return
                 
-                # Extract EEG
-                eeg_data = np.array([
-                    list(self.eeg_channels[ch])[-self.window_samples:]
-                    for ch in ['TP9', 'AF7', 'AF8', 'TP10']
-                ])
-                
-                # Extract fNIRS (normalized channels only)
-                fnirs_data = np.array([
-                    list(self.fnirs_channels[f'Ch{i}_norm'])[-self.window_samples:]
-                    for i in range(1, 5)
-                ])
-                # Add raw channels
-                fnirs_raw = np.array([
-                    list(self.fnirs_channels[f'Ch{i}_raw'])[-self.window_samples:]
-                    for i in range(1, 5)
-                ])
-                fnirs_data = np.vstack([fnirs_data, fnirs_raw])
-                
-                # Extract motion
-                motion_data = np.array([
-                    list(self.motion_channels[ch])[-self.window_samples:]
-                    for ch in ['acc_x', 'acc_y', 'acc_z', 'gyro_x', 'gyro_y', 'gyro_z']
-                ])
-                
-                current_word = self.current_word
-            
-            # Preprocess signals
-            eeg_filtered = self.preprocess_eeg(eeg_data)
-            fnirs_filtered = self.preprocess_fnirs(fnirs_data)
-            
-            # Extract features
-            word_features = self.complexity_analyzer.analyze_complexity(
-                current_word if current_word else "default"
-            )
-            features = self.extract_features(eeg_filtered, fnirs_filtered, word_features)
-            
-            # Scale features
-            features_scaled = self.scaler.transform(features.reshape(1, -1))
-            
-            # Prepare tensors
-            eeg_tensor = torch.FloatTensor(eeg_filtered).unsqueeze(0).to(self.device)
-            fnirs_tensor = torch.FloatTensor(fnirs_filtered).unsqueeze(0).to(self.device)
-            motion_tensor = torch.FloatTensor(motion_data).unsqueeze(0).to(self.device)
-            features_tensor = torch.FloatTensor(features_scaled).to(self.device)
-            
-            # Run model
-            with torch.no_grad():
-                outputs, _ = self.model(eeg_tensor, fnirs_tensor, 
-                                       motion_tensor, features_tensor)
-                probabilities = F.softmax(outputs, dim=1).cpu().numpy()[0]
-            
-            # Store results
-            if current_word:
-                self.word_confusion_scores[current_word].append(probabilities[1])
-                self.word_timestamps[current_word] = timestamp
-            
-            # Detect sentence-level confusion
-            sentence_confusion_prob = probabilities[2]
-            if sentence_confusion_prob > self.confusion_threshold * 0.8:
-                self.sentence_confusion_scores[self.current_sentence_idx].append(
-                    sentence_confusion_prob
-                )
-            
-            # Log high confusion events
-            if probabilities[1] > self.confusion_threshold:
-                print(f"🤔 Word confusion detected: '{current_word}' "
-                      f"(prob={probabilities[1]:.2f})")
-            elif probabilities[2] > self.confusion_threshold:
-                print(f"📄 Sentence confusion detected "
-                      f"(prob={probabilities[2]:.2f})")
-            
-        except Exception as e:
-            print(f"Inference error: {e}")
+                elif data_type == 'drlref' and len(args) >= 2:
+                    self.ref_channels['DRL'].append(args[0])
+                    self.ref_channels['REF'].append(args[1])
+                    self.last_ref_data = args[:2]
     
-    def preprocess_eeg(self, eeg_data):
-        """Preprocess EEG data"""
-        # Apply bandpass filter
-        sos = signal.butter(4, [0.5, 50], btype='band', fs=self.sample_rate, output='sos')
-        filtered = signal.sosfiltfilt(sos, eeg_data, axis=1)
+    def setup_gui(self):
+        """Create the GUI layout."""
+        # Main container
+        main_frame = ttk.Frame(self.root)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        # Notch filters
-        for freq in [60, 120]:
-            sos_notch = signal.butter(4, [freq-2, freq+2], btype='bandstop', 
-                                    fs=self.sample_rate, output='sos')
-            filtered = signal.sosfiltfilt(sos_notch, filtered, axis=1)
+        # Left panel - Text display
+        left_frame = ttk.Frame(main_frame)
+        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
         
-        return filtered
-    
-    def preprocess_fnirs(self, fnirs_data):
-        """Preprocess fNIRS data"""
-        # Use normalized channels
-        normalized = fnirs_data[:4]
-        detrended = signal.detrend(normalized, axis=1)
-        return fnirs_data  # Return all 8 channels
-    
-    def extract_features(self, eeg_window, fnirs_window, word_complexity):
-        """Extract features for inference"""
-        features = []
+        # Control buttons
+        control_frame = ttk.Frame(left_frame)
+        control_frame.pack(fill=tk.X, pady=(0, 10))
         
-        # EEG features
-        for ch in range(eeg_window.shape[0]):
-            ch_data = eeg_window[ch]
-            
-            # Time domain
-            features.extend([
-                np.mean(ch_data),
-                np.std(ch_data),
-                np.max(np.abs(ch_data)),
-                skew(ch_data),
-                kurtosis(ch_data)
-            ])
-            
-            # Frequency domain
-            freqs, psd = signal.welch(ch_data, fs=self.sample_rate, 
-                                     nperseg=min(256, len(ch_data)))
-            
-            # Band powers
-            bands = {
-                'delta': (0.5, 4),
-                'theta': (4, 8),
-                'alpha': (8, 13),
-                'beta': (13, 30),
-                'gamma': (30, 50)
-            }
-            
-            for band_name, (low, high) in bands.items():
-                band_mask = (freqs >= low) & (freqs < high)
-                band_power = np.trapz(psd[band_mask], freqs[band_mask])
-                features.append(band_power)
-            
-            # Peak frequency
-            peak_freq = freqs[np.argmax(psd)]
-            features.append(peak_freq)
-            
-            # Spectral entropy
-            psd_norm = psd / np.sum(psd)
-            spectral_entropy = -np.sum(psd_norm * np.log(psd_norm + 1e-15))
-            features.append(spectral_entropy)
+        self.load_model_btn = ttk.Button(control_frame, text="Load Model", 
+                                        command=self.load_model)
+        self.load_model_btn.pack(side=tk.LEFT, padx=(0, 5))
         
-        # fNIRS features
-        for ch in range(fnirs_window.shape[0]):
-            ch_data = fnirs_window[ch]
-            
-            features.extend([
-                np.mean(ch_data),
-                np.std(ch_data),
-                np.max(ch_data) - np.min(ch_data),
-                np.polyfit(np.arange(len(ch_data)), ch_data, 1)[0],
-                np.argmax(ch_data) / len(ch_data)
-            ])
+        self.load_text_btn = ttk.Button(control_frame, text="Load Text", 
+                                       command=self.load_text)
+        self.load_text_btn.pack(side=tk.LEFT, padx=(0, 5))
         
-        # Connectivity features
-        def get_band_power(signal_data, band_name):
-            freqs, psd = signal.welch(signal_data, fs=self.sample_rate, 
-                                     nperseg=min(256, len(signal_data)))
-            bands = {
-                'delta': (0.5, 4),
-                'theta': (4, 8),
-                'alpha': (8, 13),
-                'beta': (13, 30),
-                'gamma': (30, 50)
-            }
-            low, high = bands[band_name]
-            band_mask = (freqs >= low) & (freqs < high)
-            return np.trapz(psd[band_mask], freqs[band_mask])
+        self.highlight_mode_btn = ttk.Button(control_frame, text="Toggle Highlighting", 
+                                           command=self.toggle_highlighting)
+        self.highlight_mode_btn.pack(side=tk.LEFT, padx=(0, 5))
         
-        af7_alpha = get_band_power(eeg_window[1], 'alpha')
-        af8_alpha = get_band_power(eeg_window[2], 'alpha')
-        features.append(af7_alpha - af8_alpha)
+        # Text display
+        self.text_display = tk.Text(left_frame, wrap=tk.WORD, font=("Arial", 14),
+                                   width=60, height=25)
+        self.text_display.pack(fill=tk.BOTH, expand=True)
         
-        # Inter-channel coherence
-        channel_pairs = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
-        for ch1, ch2 in channel_pairs:
-            f, Cxy = signal.coherence(eeg_window[ch1], eeg_window[ch2], 
-                                     fs=self.sample_rate, nperseg=min(64, len(eeg_window[ch1])))
-            alpha_mask = (f >= 8) & (f <= 13)
-            features.append(np.mean(Cxy[alpha_mask]))
+        # Configure tags for highlighting
+        self.text_display.tag_config("word_confusion", background="yellow")
+        self.text_display.tag_config("sentence_confusion", background="orange")
+        self.text_display.tag_config("predicted_confusion", background="lightblue")
+        self.text_display.tag_config("manual_word", background="lightgreen")
+        self.text_display.tag_config("manual_sentence", background="lightcoral")
         
-        # Add word complexity features
-        features.extend([
-            word_complexity.get('length', 0),
-            word_complexity.get('syllables', 0),
-            word_complexity.get('unique_chars', 0),
-            word_complexity.get('char_variety_ratio', 0),
-            word_complexity.get('vowel_count', 0),
-            word_complexity.get('consonant_count', 0),
-            word_complexity.get('vowel_consonant_ratio', 0),
-            word_complexity.get('has_double_letters', 0),
-            word_complexity.get('has_capital', 0),
-            word_complexity.get('difficult_pattern_count', 0),
-            word_complexity.get('is_medical_term', 0),
-            word_complexity.get('prefix_count', 0),
-            word_complexity.get('suffix_count', 0),
-            word_complexity.get('estimated_grade_level', 0)
-        ])
+        # Bind mouse events
+        self.text_display.bind("<Motion>", self.track_cursor)
+        self.text_display.bind("<Button-1>", self.on_left_click)
+        self.text_display.bind("<B1-Motion>", self.on_drag)
+        self.text_display.bind("<ButtonRelease-1>", self.on_left_release)
+        self.text_display.bind("<Button-3>", self.on_right_click)
         
-        return np.array(features)
-    
-    def receiver_loop(self):
-        """Main UDP receiver loop"""
-        while self.running:
-            try:
-                data, addr = self.socket.recvfrom(4096)
-                self.packet_count += 1
-                message = self.parse_osc_message(data)
-                if message:
-                    self.process_osc_message(message)
-            except socket.timeout:
-                continue
-            except Exception as e:
-                if self.running:
-                    print(f"Receiver error: {e}")
-    
-    def setup_visualization(self):
-        """Setup matplotlib visualization (same as original)"""
-        plt.style.use('dark_background')
+        # Right panel - Debug info and plots
+        right_frame = ttk.Frame(main_frame)
+        right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
         
-        self.fig = plt.figure(figsize=(20, 12))
-        self.fig.patch.set_facecolor('#0a0a0a')
-        
-        # Create grid
-        gs = GridSpec(6, 2, figure=self.fig, 
-                     height_ratios=[3, 3, 3, 2, 2, 1],
-                     width_ratios=[4, 1],
-                     hspace=0.3)
-        
-        # Create axes
-        self.axes = {
-            'eeg': self.fig.add_subplot(gs[0, 0]),
-            'spectral': self.fig.add_subplot(gs[1, 0]),
-            'fnirs': self.fig.add_subplot(gs[2, 0]),
-            'motion': self.fig.add_subplot(gs[3, 0]),
-            'gyro': self.fig.add_subplot(gs[4, 0]),
-            'confusion': self.fig.add_subplot(gs[5, 0]),
-            'info': self.fig.add_subplot(gs[:5, 1])
-        }
-        
-        # Configure axes
-        for name, ax in self.axes.items():
-            ax.set_facecolor('#1a1a1a')
-            if name not in ['info', 'confusion']:
-                ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
-        
-        # Titles
-        titles = {
-            'eeg': ('EEG Channels (4 channels)', '#4ECDC4'),
-            'spectral': ('Spectral Analysis - Power Spectral Density', '#FFD93D'),
-            'fnirs': ('fNIRS/Optics - Functional Near-Infrared Spectroscopy', '#E74C3C'),
-            'motion': ('Accelerometer', '#96CEB4'),
-            'gyro': ('Gyroscope', '#9B59B6'),
-            'confusion': ('Real-time Confusion Detection', '#FF6B6B')
-        }
-        
-        for ax_name, (title, color) in titles.items():
-            self.axes[ax_name].set_title(title, fontsize=14, color=color, pad=10)
-        
-        # Labels
-        self.axes['eeg'].set_ylabel('Amplitude (µV)')
-        self.axes['spectral'].set_ylabel('Power (dB)')
-        self.axes['spectral'].set_xlabel('Frequency (Hz)')
-        self.axes['fnirs'].set_ylabel('Intensity')
-        self.axes['motion'].set_ylabel('Acceleration (g)')
-        self.axes['gyro'].set_ylabel('Angular velocity (°/s)')
-        self.axes['confusion'].set_ylabel('Confusion Probability')
-        self.axes['confusion'].set_xlabel('Time (s)')
-        
-        # Info panel
-        self.axes['info'].set_xticks([])
-        self.axes['info'].set_yticks([])
-        for spine in self.axes['info'].spines.values():
-            spine.set_visible(False)
-        self.axes['info'].set_title('System Status', fontsize=14, color='#FFD93D', pad=10)
-        
-        # Initialize lines
-        self._initialize_lines()
-        
-        # Add confusion probability line
-        self.confusion_line, = self.axes['confusion'].plot([], [], 
-                                                         color='#FF6B6B', 
-                                                         linewidth=2)
-        self.axes['confusion'].axhline(y=self.confusion_threshold, 
-                                      color='yellow', linestyle='--', 
-                                      alpha=0.5, label='Threshold')
-        self.axes['confusion'].set_ylim(0, 1)
-        self.axes['confusion'].legend()
-        
-        plt.tight_layout()
-    
-    def _initialize_lines(self):
-        """Initialize plot lines (same as original)"""
-        # EEG lines
-        for ch, color in self.eeg_colors.items():
-            line, = self.axes['eeg'].plot([], [], label=ch, color=color, 
-                                         linewidth=1.5, alpha=0.95)
-            self.lines[f'eeg_{ch}'] = line
-        
-        # Spectral lines
-        self.spectral_lines = {}
-        for ch, color in self.eeg_colors.items():
-            line, = self.axes['spectral'].plot([], [], label=ch, color=color, 
-                                              linewidth=1.5, alpha=0.9)
-            self.spectral_lines[ch] = line
-        
-        self.axes['spectral'].set_xlim(0, self.max_freq)
-        
-        # fNIRS lines
-        for i, (ch_base, color) in enumerate(self.fnirs_colors.items()):
-            ch_norm = f'{ch_base}_norm'
-            line, = self.axes['fnirs'].plot([], [], label=ch_base, 
-                                          color=color, linewidth=1.5, alpha=0.9)
-            self.lines[f'fnirs_{ch_norm}'] = line
-        
-        # Motion lines
-        colors = {
-            'acc': ['#3498DB', '#2ECC71', '#9B59B6'],
-            'gyro': ['#F39C12', '#E67E22', '#D35400']
-        }
-        
-        for prefix, ax_name in [('acc', 'motion'), ('gyro', 'gyro')]:
-            for i, axis in enumerate(['x', 'y', 'z']):
-                ch = f'{prefix}_{axis}'
-                line, = self.axes[ax_name].plot([], [], label=axis,
-                                               color=colors[prefix][i],
-                                               linewidth=1.5, alpha=0.9)
-                self.lines[f'motion_{ch}'] = line
-        
-        # Add legends
-        for ax_name in ['eeg', 'spectral', 'fnirs', 'motion', 'gyro']:
-            self.axes[ax_name].legend(loc='upper right', fontsize=8, 
-                                     ncol=4 if ax_name in ['eeg', 'spectral'] else 3,
-                                     framealpha=0.5)
-    
-    def update_plot(self, frame):
-        """Update all plots including confusion probabilities"""
-        # Update regular plots (same as original)
-        with self.lock:
-            if len(self.timestamps) < 2:
-                return list(self.lines.values()) + list(self.spectral_lines.values()) + [self.confusion_line]
-            
-            min_eeg_length = min(len(self.eeg_channels[ch]) for ch in self.eeg_channels 
-                               if len(self.eeg_channels[ch]) > 0)
-            
-            if min_eeg_length < 2:
-                return list(self.lines.values()) + list(self.spectral_lines.values()) + [self.confusion_line]
-            
-            # Time axis
-            timestamps = np.array(list(self.timestamps)[-min_eeg_length:])
-            if len(timestamps) > 1:
-                time_axis = timestamps - timestamps[-1]
-                display_mask = time_axis >= -self.window_duration
-                display_samples = np.sum(display_mask)
-            else:
-                return list(self.lines.values()) + list(self.spectral_lines.values()) + [self.confusion_line]
-            
-            # Update EEG
-            filtered_eeg_data = {}
-            eeg_values_for_scaling = []
-            
-            for ch_name in self.eeg_channels:
-                if ch_name in self.eeg_channels and len(self.eeg_channels[ch_name]) >= min_eeg_length:
-                    line_key = f'eeg_{ch_name}'
-                    if line_key in self.lines:
-                        data_array = np.array(list(self.eeg_channels[ch_name])[-min_eeg_length:])
-                        
-                        if len(data_array) > 50:
-                            window_size = min(50, len(data_array) // 4)
-                            if window_size > 1:
-                                moving_avg = np.convolve(data_array, 
-                                                       np.ones(window_size)/window_size, 
-                                                       mode='same')
-                                filtered_data = data_array - moving_avg
-                            else:
-                                filtered_data = data_array - np.mean(data_array)
-                        else:
-                            filtered_data = data_array - np.mean(data_array)
-                        
-                        filtered_eeg_data[ch_name] = filtered_data
-                        
-                        display_time = time_axis[display_mask]
-                        display_data = filtered_data[display_mask]
-                        
-                        self.lines[line_key].set_data(display_time, display_data)
-                        eeg_values_for_scaling.extend(display_data)
-            
-            # Update spectral analysis
-            if len(filtered_eeg_data) == 4:
-                all_psd_values = []
-                
-                for ch_name, data in filtered_eeg_data.items():
-                    if ch_name in self.spectral_lines:
-                        frequencies, psd = self.compute_spectrum(data[-int(self.sample_rate * 4):])
-                        
-                        if frequencies is not None:
-                            self.spectral_lines[ch_name].set_data(frequencies, psd)
-                            all_psd_values.extend(psd)
-                
-                if all_psd_values:
-                    y_min = np.percentile(all_psd_values, 5) - 5
-                    y_max = np.percentile(all_psd_values, 95) + 5
-                    self.axes['spectral'].set_ylim(y_min, y_max)
-            
-            # Update other channels
-            for channel_dict, prefix in [(self.fnirs_channels, 'fnirs'), 
-                                        (self.motion_channels, 'motion')]:
-                for ch_name, data_deque in channel_dict.items():
-                    if len(data_deque) > 0:
-                        if prefix == 'fnirs' and ch_name.endswith('_norm'):
-                            line_key = f'{prefix}_{ch_name}'
-                        elif prefix == 'fnirs' and ch_name.endswith('_raw'):
-                            continue
-                        else:
-                            line_key = f'{prefix}_{ch_name}'
-                        
-                        if line_key in self.lines:
-                            data_array = np.array(list(data_deque))
-                            if len(data_array) >= len(display_mask):
-                                aligned_data = data_array[-len(display_mask):]
-                                self.lines[line_key].set_data(
-                                    time_axis[display_mask],
-                                    aligned_data[display_mask]
-                                )
-            
-            # Update axes limits
-            for ax in [self.axes['eeg'], self.axes['fnirs'], 
-                      self.axes['motion'], self.axes['gyro']]:
-                ax.set_xlim(-self.window_duration, 0)
-                ax.relim()
-                ax.autoscale_view(scalex=False, scaley=True)
-            
-            # Special EEG scaling
-            if eeg_values_for_scaling:
-                eeg_std = np.std(eeg_values_for_scaling)
-                eeg_median = np.median(eeg_values_for_scaling)
-                y_range = 4 * eeg_std
-                self.axes['eeg'].set_ylim(eeg_median - y_range/2, eeg_median + y_range/2)
-            
-            # Update confusion probability plot
-            # (This would show recent confusion scores)
-            self.axes['confusion'].set_xlim(-self.window_duration, 0)
-            
-            # Update info panel
-            self._update_info_panel()
-        
-        return list(self.lines.values()) + list(self.spectral_lines.values()) + [self.confusion_line]
-    
-    def compute_spectrum(self, data, sample_rate=256):
-        """Compute power spectral density"""
-        if len(data) < self.spectral_window_size:
-            return None, None
-        
-        frequencies, psd = signal.welch(
-            data, 
-            fs=sample_rate, 
-            nperseg=min(len(data), self.spectral_window_size),
-            noverlap=min(len(data)//2, self.spectral_window_size//2),
-            scaling='density'
-        )
-        
-        freq_mask = frequencies <= self.max_freq
-        frequencies = frequencies[freq_mask]
-        psd = psd[freq_mask]
-        psd_db = 10 * np.log10(psd + 1e-10)
-        
-        return frequencies, psd_db
-    
-    def _update_info_panel(self):
-        """Update statistics panel with confusion detection info"""
-        self.axes['info'].clear()
-        self.axes['info'].set_xticks([])
-        self.axes['info'].set_yticks([])
-        for spine in self.axes['info'].spines.values():
-            spine.set_visible(False)
-        
-        y_pos = 0.95
-        self.axes['info'].text(0.1, y_pos, 'System Status', 
-                             fontsize=12, weight='bold', color='#FFD93D',
-                             transform=self.axes['info'].transAxes)
-        
-        # Model status
-        y_pos -= 0.06
-        self.axes['info'].text(0.1, y_pos, '🧠 Model: Active', 
-                             fontsize=10, color='#4ECDC4',
-                             transform=self.axes['info'].transAxes)
+        # Debug info panel
+        debug_frame = ttk.LabelFrame(right_frame, text="Debug Information")
+        debug_frame.pack(fill=tk.X, pady=(0, 10))
         
         # Current word
-        y_pos -= 0.05
-        self.axes['info'].text(0.1, y_pos, f'Word: {self.current_word[:15] if self.current_word else "-"}', 
-                             fontsize=9, color='#FFD93D',
-                             transform=self.axes['info'].transAxes)
+        self.current_word_label = ttk.Label(debug_frame, text="1. Current Word: None", 
+                                          font=("Arial", 10))
+        self.current_word_label.pack(anchor=tk.W, padx=10, pady=2)
         
-        # Confusion stats
-        y_pos -= 0.06
-        self.axes['info'].text(0.1, y_pos, 'Detected:', 
-                             fontsize=10, weight='bold', color='#FF6B6B',
-                             transform=self.axes['info'].transAxes)
+        # EEG/fNIRS/Motion values
+        self.signal_values_label = ttk.Label(debug_frame, 
+                                           text="2. Signals: No data", 
+                                           font=("Arial", 10))
+        self.signal_values_label.pack(anchor=tk.W, padx=10, pady=2)
         
-        y_pos -= 0.04
-        confused_words = sum(1 for word, scores in self.word_confusion_scores.items() 
-                           if scores and max(scores) > self.confusion_threshold)
-        self.axes['info'].text(0.1, y_pos, f'🤔 Words: {confused_words}', 
-                             fontsize=9, color='#FF8866',
-                             transform=self.axes['info'].transAxes)
+        # Word history
+        self.word_history_label = ttk.Label(debug_frame, 
+                                          text="3. Last 3 words: None", 
+                                          font=("Arial", 10))
+        self.word_history_label.pack(anchor=tk.W, padx=10, pady=2)
         
-        y_pos -= 0.04
-        confused_sentences = sum(1 for idx, scores in self.sentence_confusion_scores.items() 
-                               if scores and max(scores) > self.confusion_threshold)
-        self.axes['info'].text(0.1, y_pos, f'📄 Sentences: {confused_sentences}', 
-                             fontsize=9, color='#FF6655',
-                             transform=self.axes['info'].transAxes)
+        # Model status
+        self.model_status_label = ttk.Label(debug_frame, 
+                                          text="4. Model: Not loaded", 
+                                          font=("Arial", 10), foreground="red")
+        self.model_status_label.pack(anchor=tk.W, padx=10, pady=2)
         
-        # Prediction visibility
-        y_pos -= 0.05
-        mode_text = "SHOWING" if self.show_predictions else "HIDDEN"
-        mode_color = '#4ECDC4' if self.show_predictions else '#888888'
-        self.axes['info'].text(0.1, y_pos, f'Predictions: {mode_text}', 
-                             fontsize=9, color=mode_color,
-                             transform=self.axes['info'].transAxes)
+        # Data flow status with packet count
+        self.data_flow_label = ttk.Label(debug_frame, 
+                                        text="5. Data Flow: Inactive", 
+                                        font=("Arial", 10), foreground="red")
+        self.data_flow_label.pack(anchor=tk.W, padx=10, pady=2)
         
-        # Text info
-        y_pos -= 0.06
-        self.axes['info'].text(0.1, y_pos, f'Text: {self.current_text_index + 1}/{len(TRAINING_TEXTS)}', 
-                             fontsize=9, color='#aaaaaa',
-                             transform=self.axes['info'].transAxes)
+        # Predicted words
+        self.predicted_words_text = tk.Text(debug_frame, height=4, width=50, 
+                                          font=("Arial", 9))
+        self.predicted_words_text.pack(padx=10, pady=5)
+        self.predicted_words_text.insert(1.0, "6. Predicted confusing words:\nNone")
+        self.predicted_words_text.config(state=tk.DISABLED)
         
-        # EEG stats
-        y_pos -= 0.08
-        self.axes['info'].text(0.1, y_pos, 'EEG (4ch):', fontsize=10, 
-                             weight='bold', color='#4ECDC4',
-                             transform=self.axes['info'].transAxes)
-        y_pos -= 0.05
+        # Dummy highlighting button
+        self.dummy_highlight_btn = ttk.Button(debug_frame, 
+                                            text="7. Toggle Dummy Highlighting", 
+                                            command=self.toggle_dummy_highlighting)
+        self.dummy_highlight_btn.pack(pady=5)
         
-        for ch in self.eeg_channels:
-            if len(self.eeg_channels[ch]) > 0:
-                data = np.array(list(self.eeg_channels[ch])[-100:])
-                mean_val = np.mean(data)
-                std_val = np.std(data)
-                self.axes['info'].text(0.15, y_pos, f'{ch}:', fontsize=9,
-                                     color=self.eeg_colors[ch],
-                                     transform=self.axes['info'].transAxes)
-                self.axes['info'].text(0.4, y_pos, f'{mean_val:.1f}±{std_val:.1f}',
-                                     fontsize=9, color='white',
-                                     transform=self.axes['info'].transAxes)
-                y_pos -= 0.04
+        # Signal plots
+        plot_frame = ttk.LabelFrame(right_frame, text="Signal Visualization")
+        plot_frame.pack(fill=tk.BOTH, expand=True)
         
-        # System stats
-        y_pos -= 0.06
-        self.axes['info'].text(0.1, y_pos, 'Packets:', fontsize=10,
-                             weight='bold', color='#95A5A6',
-                             transform=self.axes['info'].transAxes)
-        y_pos -= 0.05
+        # Create matplotlib figure
+        self.fig, self.axes = plt.subplots(3, 1, figsize=(6, 6), tight_layout=True)
+        self.fig.patch.set_facecolor('white')
         
-        stats = [
-            ('Total:', self.packet_count),
-            ('EEG:', self.eeg_packet_count),
-            ('fNIRS:', self.fnirs_packet_count)
-        ]
+        self.canvas = FigureCanvasTkAgg(self.fig, master=plot_frame)
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
         
-        for label, value in stats:
-            self.axes['info'].text(0.15, y_pos, label, fontsize=9, color='white',
-                                 transform=self.axes['info'].transAxes)
-            self.axes['info'].text(0.4, y_pos, f'{value}', fontsize=9, color='white',
-                                 transform=self.axes['info'].transAxes)
-            y_pos -= 0.04
+        # Initialize plots
+        self.lines = {}
+        self.axes[0].set_ylabel('EEG (µV)')
+        self.axes[1].set_ylabel('fNIRS')
+        self.axes[2].set_ylabel('Motion')
+        self.axes[2].set_xlabel('Time (s)')
+        
+        for ax in self.axes:
+            ax.grid(True, alpha=0.3)
+        
+        # Start plot updates
+        self.update_plots()
     
-    def start(self):
-        """Start the real-time confusion detection system"""
-        print("\n" + "="*60)
-        print("   REAL-TIME EEG/fNIRS CONFUSION DETECTION SYSTEM")
-        print("="*60)
-        print(f"\n🧠 Model loaded on {self.device}")
-        print(f"📡 Listening for OSC data on UDP port {self.port}")
-        print("\n⌨️  Controls:")
-        print("  • D: Toggle confusion highlighting")
-        print("  • ←/→: Change text")
-        print("  • +/-: Adjust threshold")
-        print("  • Q: Quit")
+    def load_model(self):
+        """Load a trained model from file."""
+        filename = filedialog.askopenfilename(
+            title="Select Model File",
+            filetypes=[("PyTorch Model", "*.pth"), ("All files", "*.*")]
+        )
         
-        # Start UDP receiver
+        if filename:
+            self.model = ConfusionDetectorModel(filename)
+            self.model_loaded = True
+            self.model_status_label.config(text="4. Model: Loaded ✓", 
+                                         foreground="green")
+    
+    def load_text(self):
+        """Load text content from file."""
+        filename = filedialog.askopenfilename(
+            title="Select Text File",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
+        )
+        
+        if filename:
+            with open(filename, 'r', encoding='utf-8') as f:
+                self.text_content = f.read()
+            
+            self.text_display.delete(1.0, tk.END)
+            self.text_display.insert(1.0, self.text_content)
+            
+            # Parse word positions
+            self.parse_word_positions()
+    
+    def parse_word_positions(self):
+        """Parse and store word positions in the text."""
+        self.word_positions = []
+        text = self.text_display.get(1.0, tk.END)
+        
+        current_pos = 0
+        for line_num, line in enumerate(text.split('\n')):
+            word_start = None
+            for i, char in enumerate(line):
+                if char.isalnum() or char in "-'":
+                    if word_start is None:
+                        word_start = current_pos + i
+                else:
+                    if word_start is not None:
+                        word_end = current_pos + i
+                        word = text[word_start:word_end]
+                        self.word_positions.append((word_start, word_end, word))
+                        word_start = None
+            
+            # Handle word at end of line
+            if word_start is not None:
+                word_end = current_pos + len(line)
+                word = text[word_start:word_end]
+                self.word_positions.append((word_start, word_end, word))
+            
+            current_pos += len(line) + 1  # +1 for newline
+    
+    def track_cursor(self, event):
+        """Track cursor position and identify current word."""
+        if not self.data_streaming:
+            return
+        
+        # Get cursor position in text
+        index = self.text_display.index(f"@{event.x},{event.y}")
+        position = self.text_display.count("1.0", index, "chars")[0]
+        
+        # Find word at position
+        for start, end, word in self.word_positions:
+            if start <= position < end:
+                if word != self.current_word:
+                    self.current_word = word
+                    self.word_history.append(word)
+                    complexity = extract_word_complexity_features(word)
+                    self.word_complexities.append(complexity)
+                    self.update_debug_info()
+                break
+    
+    def update_debug_info(self):
+        """Update debug information display."""
+        # 1. Current word
+        self.current_word_label.config(text=f"1. Current Word: {self.current_word}")
+        
+        # 2. Signal values (latest)
+        with self.lock:
+            if len(self.eeg_channels['TP9']) > 0:
+                eeg_str = f"EEG: {self.eeg_channels['TP9'][-1]:.1f}µV"
+                fnirs_str = f"fNIRS: {self.fnirs_channels['Ch1_norm'][-1]:.3f}" if len(self.fnirs_channels['Ch1_norm']) > 0 else "fNIRS: --"
+                motion_str = f"Motion: {self.motion_channels['acc_x'][-1]:.2f}g" if len(self.motion_channels['acc_x']) > 0 else "Motion: --"
+                signal_text = f"2. {eeg_str}, {fnirs_str}, {motion_str}"
+            else:
+                signal_text = "2. Signals: No data"
+        
+        self.signal_values_label.config(text=signal_text)
+        
+        # 3. Word history
+        history_text = "3. Last 3 words: "
+        if self.word_history:
+            words_with_complexity = []
+            for i, word in enumerate(self.word_history):
+                if i < len(self.word_complexities):
+                    complexity = self.word_complexities[i]
+                    grade_level = complexity[13] if len(complexity) > 13 else 0
+                    words_with_complexity.append(f"{word} (GL:{grade_level:.1f})")
+            history_text += ", ".join(words_with_complexity)
+        else:
+            history_text += "None"
+        
+        self.word_history_label.config(text=history_text)
+        
+        # 5. Data flow with packet counts
+        if self.data_flow_active:
+            flow_text = f"5. Data Flow: Active ✓ (EEG: {self.eeg_packet_count}, fNIRS: {self.fnirs_packet_count})"
+            color = "green"
+        else:
+            flow_text = "5. Data Flow: Inactive (No packets received)"
+            color = "red"
+        self.data_flow_label.config(text=flow_text, foreground=color)
+        
+        # 6. Predicted words
+        self.predicted_words_text.config(state=tk.NORMAL)
+        self.predicted_words_text.delete(1.0, tk.END)
+        
+        if self.predicted_confusing_words:
+            # Sort by confidence
+            sorted_words = sorted(self.word_predictions.items(), 
+                                key=lambda x: x[1], reverse=True)[:10]
+            text = "6. Predicted confusing words:\n"
+            for word, prob in sorted_words:
+                if prob > 0.3:  # Only show significant predictions
+                    text += f"  {word}: {prob:.2%}\n"
+        else:
+            text = "6. Predicted confusing words:\nNone"
+        
+        self.predicted_words_text.insert(1.0, text)
+        self.predicted_words_text.config(state=tk.DISABLED)
+    
+    def toggle_highlighting(self):
+        """Toggle highlighting mode."""
+        self.highlighting_mode = not self.highlighting_mode
+        
+        if self.highlighting_mode:
+            self.highlight_mode_btn.config(text="Highlighting: ON")
+            self.apply_predictions()
+        else:
+            self.highlight_mode_btn.config(text="Highlighting: OFF")
+            self.clear_highlights()
+    
+    def toggle_dummy_highlighting(self):
+        """Toggle dummy highlighting mode."""
+        self.dummy_highlighting_mode = not self.dummy_highlighting_mode
+        
+        if self.dummy_highlighting_mode:
+            self.dummy_highlight_btn.config(text="Dummy Mode: ON")
+            self.data_streaming = False
+            # Show predicted highlights
+            self.apply_predictions()
+        else:
+            self.dummy_highlight_btn.config(text="Dummy Mode: OFF")
+            self.data_streaming = True
+            self.clear_manual_highlights()
+    
+    def apply_predictions(self):
+        """Apply predicted confusion highlighting."""
+        if not self.highlighting_mode and not self.dummy_highlighting_mode:
+            return
+        
+        # Clear previous predicted highlights
+        self.text_display.tag_remove("predicted_confusion", "1.0", tk.END)
+        
+        # Apply new highlights
+        for word, prob in self.word_predictions.items():
+            if prob > 0.5:  # Threshold for highlighting
+                for start, end, w in self.word_positions:
+                    if w == word:
+                        start_idx = self.text_display.index(f"1.0 + {start} chars")
+                        end_idx = self.text_display.index(f"1.0 + {end} chars")
+                        self.text_display.tag_add("predicted_confusion", 
+                                                start_idx, end_idx)
+    
+    def clear_highlights(self):
+        """Clear all highlights."""
+        self.text_display.tag_remove("predicted_confusion", "1.0", tk.END)
+        self.text_display.tag_remove("word_confusion", "1.0", tk.END)
+        self.text_display.tag_remove("sentence_confusion", "1.0", tk.END)
+    
+    def clear_manual_highlights(self):
+        """Clear manual highlights."""
+        self.text_display.tag_remove("manual_word", "1.0", tk.END)
+        self.text_display.tag_remove("manual_sentence", "1.0", tk.END)
+        self.manual_highlights = {'words': set(), 'sentences': set()}
+    
+    def on_left_click(self, event):
+        """Handle left click for word selection."""
+        if self.dummy_highlighting_mode:
+            self.selection_start = self.text_display.index(f"@{event.x},{event.y}")
+    
+    def on_drag(self, event):
+        """Handle drag for word selection."""
+        if self.dummy_highlighting_mode:
+            self.selection_end = self.text_display.index(f"@{event.x},{event.y}")
+    
+    def on_left_release(self, event):
+        """Handle left release for word highlighting."""
+        if self.dummy_highlighting_mode and hasattr(self, 'selection_start'):
+            try:
+                selected_text = self.text_display.get(self.selection_start, 
+                                                    self.selection_end).strip()
+                if selected_text:
+                    self.manual_highlights['words'].add(selected_text)
+                    self.text_display.tag_add("manual_word", 
+                                            self.selection_start, 
+                                            self.selection_end)
+            except:
+                pass
+    
+    def on_right_click(self, event):
+        """Handle right click for sentence highlighting."""
+        if self.dummy_highlighting_mode:
+            # Find sentence boundaries
+            index = self.text_display.index(f"@{event.x},{event.y}")
+            text = self.text_display.get("1.0", tk.END)
+            
+            # Find sentence containing click position
+            position = self.text_display.count("1.0", index, "chars")[0]
+            
+            # Find sentence start
+            sentence_start = position
+            while sentence_start > 0 and text[sentence_start-1] not in '.!?':
+                sentence_start -= 1
+            
+            # Find sentence end
+            sentence_end = position
+            while sentence_end < len(text) and text[sentence_end] not in '.!?':
+                sentence_end += 1
+            
+            if text[sentence_end] in '.!?':
+                sentence_end += 1
+            
+            # Highlight sentence
+            start_idx = self.text_display.index(f"1.0 + {sentence_start} chars")
+            end_idx = self.text_display.index(f"1.0 + {sentence_end} chars")
+            
+            sentence = text[sentence_start:sentence_end].strip()
+            if sentence:
+                self.manual_highlights['sentences'].add(sentence)
+                self.text_display.tag_add("manual_sentence", start_idx, end_idx)
+    
+    def start_data_collection(self):
+        """Start OSC data collection thread."""
+        self.osc_thread = threading.Thread(target=self.osc_receiver, daemon=True)
+        self.osc_thread.start()
+    
+    def osc_receiver(self):
+        """Receive and parse OSC messages using eegtrainer.py's method."""
         try:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            # Bind to 0.0.0.0 instead of localhost to receive from network
             self.socket.bind(('0.0.0.0', self.port))
             self.socket.settimeout(0.1)
             self.running = True
             
-            receiver_thread = threading.Thread(target=self.receiver_loop)
-            receiver_thread.daemon = True
-            receiver_thread.start()
+            print(f"📡 Listening for OSC data on UDP port {self.port}")
+            print("Make sure Muse Direct is streaming to this computer's IP address")
             
+            while self.running:
+                try:
+                    data, addr = self.socket.recvfrom(4096)  # Increased buffer size
+                    self.packet_count += 1
+                    message = self.parse_osc_message(data)
+                    if message and self.data_streaming:
+                        self.process_osc_message(message)
+                except socket.timeout:
+                    continue
+                except Exception as e:
+                    if self.running:
+                        print(f"Receiver error: {e}")
+        
         except Exception as e:
             print(f"❌ Failed to start receiver: {e}")
+        
+        finally:
+            if self.socket:
+                self.socket.close()
+    
+    def start_prediction_loop(self):
+        """Start the prediction loop."""
+        self.prediction_thread = threading.Thread(target=self.prediction_loop, 
+                                                daemon=True)
+        self.prediction_thread.start()
+    
+    def prediction_loop(self):
+        """Run predictions on current data windows."""
+        while self.running:
+            if self.model_loaded and self.data_flow_active and len(self.timestamps) >= self.buffer_size:
+                try:
+                    # Get current data window
+                    with self.lock:
+                        eeg_data = np.array([
+                            list(self.eeg_channels['TP9']),
+                            list(self.eeg_channels['AF7']),
+                            list(self.eeg_channels['AF8']),
+                            list(self.eeg_channels['TP10'])
+                        ]).T
+                        
+                        fnirs_data = np.array([
+                            list(self.fnirs_channels[f'Ch{i}_norm']) for i in range(1, 5)
+                        ] + [
+                            list(self.fnirs_channels[f'Ch{i}_raw']) for i in range(1, 5)
+                        ]).T
+                        
+                        motion_data = np.array([
+                            list(self.motion_channels['acc_x']),
+                            list(self.motion_channels['acc_y']),
+                            list(self.motion_channels['acc_z']),
+                            list(self.motion_channels['gyro_x']),
+                            list(self.motion_channels['gyro_y']),
+                            list(self.motion_channels['gyro_z'])
+                        ]).T
+                    
+                    # Ensure correct shapes
+                    if eeg_data.shape[0] < self.buffer_size:
+                        continue
+                    
+                    # Get word features for current word
+                    word_features = extract_word_complexity_features(self.current_word)
+                    
+                    # Make prediction
+                    probs, attention = self.model.predict(
+                        eeg_data[-self.buffer_size:],
+                        fnirs_data[-self.buffer_size:] if fnirs_data.shape[0] >= self.buffer_size else np.zeros((self.buffer_size, 8)),
+                        motion_data[-self.buffer_size:] if motion_data.shape[0] >= self.buffer_size else np.zeros((self.buffer_size, 6)),
+                        word_features
+                    )
+                    
+                    if probs is not None:
+                        # Update predictions
+                        confusion_prob = probs[0][1] + probs[0][2]  # Word + Sentence confusion
+                        
+                        if self.current_word and confusion_prob > 0.3:
+                            self.word_predictions[self.current_word] = confusion_prob
+                            self.predicted_confusing_words.add(self.current_word)
+                        
+                        # Update display if highlighting is on
+                        if self.highlighting_mode:
+                            self.root.after(0, self.apply_predictions)
+                        
+                        # Update debug info
+                        self.root.after(0, self.update_debug_info)
+                
+                except Exception as e:
+                    print(f"Prediction error: {e}")
+            
+            time.sleep(0.1)  # 10 Hz prediction rate
+    
+    def update_plots(self):
+        """Update signal visualization plots."""
+        if not self.running:
             return
         
-        # Setup visualization
-        self.setup_visualization()
-        
-        # Create enhanced teleprompter
-        print("\n🖥️ Opening enhanced teleprompter window...")
-        self.teleprompter = EnhancedTeleprompterWindow(self)
-        self.teleprompter.update_loop()
-        
-        # Keyboard shortcuts
-        def on_key(event):
-            if event.key == 'q':
-                print("\nQuitting...")
-                if self.teleprompter and self.teleprompter.active:
-                    self.teleprompter.on_close()
-                plt.close('all')
-                self.stop()
-            elif event.key == 'd':
-                self.toggle_predictions()
-            elif event.key in ['+', '=']:
-                self.confusion_threshold = min(self.confusion_threshold + 0.05, 0.95)
-                print(f"Confusion threshold: {self.confusion_threshold:.2f}")
-            elif event.key == '-':
-                self.confusion_threshold = max(self.confusion_threshold - 0.05, 0.05)
-                print(f"Confusion threshold: {self.confusion_threshold:.2f}")
-            elif event.key == 'Left':
-                self.previous_text()
-            elif event.key == 'Right':
-                self.next_text()
-        
-        self.fig.canvas.mpl_connect('key_press_event', on_key)
-        
-        # Start animation
-        self.animation = animation.FuncAnimation(
-            self.fig, self.update_plot,
-            interval=40,  # 25 FPS
-            blit=False,
-            cache_frame_data=False
-        )
-        
-        print("\n✅ System started! Read the text and press 'D' to see detected confusion.")
-        print("\n" + "="*60)
-        
-        try:
-            # Run both windows
-            def run_teleprompter():
-                if self.teleprompter:
-                    self.teleprompter.root.mainloop()
+        with self.lock:
+            # Update EEG plot
+            if len(self.eeg_channels['TP9']) > 10:
+                time_vec = np.linspace(-3, 0, len(self.eeg_channels['TP9']))
+                
+                self.axes[0].clear()
+                for i, (name, data) in enumerate(self.eeg_channels.items()):
+                    if len(data) > 10:
+                        # Apply high-pass filter for visualization
+                        b, a = signal.butter(2, 1, btype='high', fs=256)
+                        filtered = signal.filtfilt(b, a, list(data))
+                        self.axes[0].plot(time_vec, filtered - i*50, 
+                                        label=name, alpha=0.8)
+                
+                self.axes[0].set_ylabel('EEG (µV)')
+                self.axes[0].legend(loc='upper right', fontsize=8)
+                self.axes[0].set_ylim(-200, 50)
+                self.axes[0].grid(True, alpha=0.3)
             
-            teleprompter_thread = threading.Thread(target=run_teleprompter)
-            teleprompter_thread.daemon = True
-            teleprompter_thread.start()
+            # Update fNIRS plot
+            if len(self.fnirs_channels['Ch1_norm']) > 10:
+                time_vec = np.linspace(-3, 0, len(self.fnirs_channels['Ch1_norm']))
+                
+                self.axes[1].clear()
+                for i in range(1, 5):
+                    ch_data = list(self.fnirs_channels[f'Ch{i}_norm'])
+                    if len(ch_data) > 10:
+                        self.axes[1].plot(time_vec, ch_data, 
+                                        label=f'Ch{i}', alpha=0.8)
+                
+                self.axes[1].set_ylabel('fNIRS (norm)')
+                self.axes[1].legend(loc='upper right', fontsize=8)
+                self.axes[1].grid(True, alpha=0.3)
             
-            plt.show()
-        except KeyboardInterrupt:
-            print("\nKeyboard interrupt received")
-            if self.teleprompter and self.teleprompter.active:
-                self.teleprompter.on_close()
-        finally:
-            self.stop()
-    
-    def toggle_predictions(self):
-        """Toggle visibility of confusion predictions"""
-        self.show_predictions = not self.show_predictions
-        if self.teleprompter:
-            self.teleprompter.update_display()
+            # Update motion plot
+            if len(self.motion_channels['acc_x']) > 10:
+                time_vec = np.linspace(-3, 0, len(self.motion_channels['acc_x']))
+                
+                self.axes[2].clear()
+                for name, data in self.motion_channels.items():
+                    if len(data) > 10 and 'acc' in name:
+                        self.axes[2].plot(time_vec, list(data), 
+                                        label=name, alpha=0.8)
+                
+                self.axes[2].set_ylabel('Acceleration (g)')
+                self.axes[2].set_xlabel('Time (s)')
+                self.axes[2].legend(loc='upper right', fontsize=8)
+                self.axes[2].grid(True, alpha=0.3)
         
-        mode = "visible" if self.show_predictions else "hidden"
-        print(f"\n👁️ Confusion predictions: {mode}")
+        self.canvas.draw()
+        
+        # Schedule next update
+        self.root.after(100, self.update_plots)  # 10 Hz update
     
-    def next_text(self):
-        """Navigate to next text"""
-        self.current_text_index = (self.current_text_index + 1) % len(TRAINING_TEXTS)
-        self.reset_confusion_scores()
-        if self.teleprompter:
-            self.teleprompter.update_display()
-        print(f"\n📖 Text {self.current_text_index + 1}/{len(TRAINING_TEXTS)}")
-    
-    def previous_text(self):
-        """Navigate to previous text"""
-        self.current_text_index = (self.current_text_index - 1) % len(TRAINING_TEXTS)
-        self.reset_confusion_scores()
-        if self.teleprompter:
-            self.teleprompter.update_display()
-        print(f"\n📖 Text {self.current_text_index + 1}/{len(TRAINING_TEXTS)}")
-    
-    def reset_confusion_scores(self):
-        """Reset confusion scores for new text"""
-        self.word_confusion_scores.clear()
-        self.sentence_confusion_scores.clear()
-        self.word_timestamps.clear()
-        self.current_sentence_idx = 0
-    
-    def stop(self):
-        """Stop the system"""
+    def on_closing(self):
+        """Clean up when closing the application."""
         self.running = False
         if self.socket:
             self.socket.close()
-        
-        if self.teleprompter and self.teleprompter.active:
-            self.teleprompter.on_close()
-        
-        print(f"\n{'='*50}")
-        print(f"SYSTEM STOPPED")
-        print(f"Total packets: {self.packet_count}")
-        print(f"Confused words detected: {len(self.word_confusion_scores)}")
-        print(f"{'='*50}\n")
-
-
-class EnhancedTeleprompterWindow:
-    """Enhanced teleprompter with real-time confusion highlighting"""
-    
-    def __init__(self, detector):
-        self.detector = detector
-        self.root = tk.Tk()
-        self.root.title("👁 REAL-TIME CONFUSION DETECTION")
-        
-        # Window setup
-        self.root.geometry("1200x800")
-        self.root.configure(bg='#0a0a0a')
-        self.active = True
-        
-        # Cursor tracking
-        self.current_word = ""
-        self.cursor_update_interval = 50
-        self.last_cursor_update = 0
-        
-        # Text tags for highlighting
-        self.word_tags = {}
-        self.sentence_tags = {}
-        
-        # UI Setup
-        self._setup_ui()
-        
-        # Bind events
-        self._bind_events()
-        
-        # Initialize display
-        self.update_display()
-        self.track_cursor()
-    
-    def _setup_ui(self):
-        """Setup the UI components"""
-        # Header
-        header_frame = tk.Frame(self.root, bg='#1a1a1a', height=80)
-        header_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
-        header_frame.pack_propagate(False)
-        
-        tk.Label(header_frame, 
-                text="👁 REAL-TIME CONFUSION DETECTION",
-                font=('Arial', 24, 'bold'),
-                fg='#FFD93D',
-                bg='#1a1a1a').pack(pady=10)
-        
-        tk.Label(header_frame,
-                text="Read the text • Press D to toggle confusion highlighting",
-                font=('Arial', 14),
-                fg='#4ECDC4',
-                bg='#1a1a1a').pack()
-        
-        # Text display
-        text_frame = tk.Frame(self.root, bg='#0a0a0a')
-        text_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
-        
-        self.text_display = tk.Text(text_frame,
-                                   font=('Georgia', 28, 'normal'),
-                                   bg='#0a0a0a',
-                                   fg='white',
-                                   wrap=tk.WORD,
-                                   padx=40,
-                                   pady=30,
-                                   spacing1=10,
-                                   spacing2=8,
-                                   spacing3=10,
-                                   insertwidth=0,
-                                   highlightthickness=0,
-                                   borderwidth=0,
-                                   relief=tk.FLAT,
-                                   cursor="hand2")
-        self.text_display.pack(fill=tk.BOTH, expand=True)
-        self.text_display.config(state=tk.DISABLED)
-        
-        # Configure highlight colors
-        self.text_display.tag_configure("word_confusion", 
-                                       background="#ff6666", 
-                                       foreground="white",
-                                       font=('Georgia', 28, 'bold'))
-        self.text_display.tag_configure("sentence_confusion", 
-                                       background="#ffaa66", 
-                                       foreground="white")
-        self.text_display.tag_configure("current_word",
-                                       underline=True,
-                                       underlinefg="#FFD93D")
-        
-        # Status frame
-        status_frame = tk.Frame(self.root, bg='#1a1a1a', height=120)
-        status_frame.pack(fill=tk.X, padx=10, pady=(5, 10))
-        status_frame.pack_propagate(False)
-        
-        # Status labels
-        self.text_status = tk.Label(status_frame,
-                                   text=f"Text: 1/{len(TRAINING_TEXTS)}",
-                                   font=('Arial', 16),
-                                   fg='#96CEB4',
-                                   bg='#1a1a1a')
-        self.text_status.pack(side=tk.LEFT, padx=20, pady=10)
-        
-        self.prediction_status = tk.Label(status_frame,
-                                        text="🔍 Predictions: HIDDEN",
-                                        font=('Arial', 16, 'bold'),
-                                        fg='#888888',
-                                        bg='#1a1a1a')
-        self.prediction_status.pack(side=tk.LEFT, padx=20, pady=10)
-        
-        self.confusion_status = tk.Label(status_frame,
-                                       text="Confused: Words=0, Sentences=0",
-                                       font=('Arial', 16),
-                                       fg='#E74C3C',
-                                       bg='#1a1a1a')
-        self.confusion_status.pack(side=tk.LEFT, padx=20, pady=10)
-        
-        self.threshold_status = tk.Label(status_frame,
-                                       text=f"Threshold: {self.detector.confusion_threshold:.2f}",
-                                       font=('Arial', 14),
-                                       fg='#FFD93D',
-                                       bg='#1a1a1a')
-        self.threshold_status.pack(side=tk.RIGHT, padx=20, pady=5)
-        
-        # Additional status
-        self.word_status = tk.Label(status_frame,
-                                   text="Current word: -",
-                                   font=('Arial', 14, 'italic'),
-                                   fg='#FFD93D',
-                                   bg='#1a1a1a')
-        self.word_status.pack(side=tk.RIGHT, padx=20, pady=5)
-        
-        tk.Label(status_frame,
-                text="D: Toggle Highlights | ←/→: Change Text | +/-: Threshold | Q: Quit",
-                font=('Arial', 12),
-                fg='#888888',
-                bg='#1a1a1a').pack(side=tk.BOTTOM, padx=20, pady=5)
-    
-    def _bind_events(self):
-        """Bind all event handlers"""
-        self.root.bind('<Key>', self.on_key_press)
-        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
-        
-        # Mouse events
-        self.text_display.bind('<Motion>', self.on_mouse_motion)
-        self.text_display.bind('<Leave>', self.on_mouse_leave)
-    
-    def on_mouse_motion(self, event):
-        """Track cursor position over text and detect sentence"""
-        current_time = time.time() * 1000
-        
-        if current_time - self.last_cursor_update < self.cursor_update_interval:
-            return
-        
-        self.last_cursor_update = current_time
-        
-        try:
-            index = self.text_display.index(f"@{event.x},{event.y}")
-            
-            # Get word at cursor
-            word_start = self.text_display.index(f"{index} wordstart")
-            word_end = self.text_display.index(f"{index} wordend")
-            word = self.text_display.get(word_start, word_end).strip()
-            
-            # Remove previous highlighting of current word
-            self.text_display.tag_remove("current_word", "1.0", tk.END)
-            
-            if word and word != self.current_word:
-                self.current_word = word
-                self.detector.current_word = word
-                self.word_status.config(text=f"Current word: {word}")
-                
-                # Highlight current word
-                self.text_display.tag_add("current_word", word_start, word_end)
-            
-            # Detect current sentence
-            text_content = self.text_display.get("1.0", tk.END)
-            cursor_pos = len(self.text_display.get("1.0", index))
-            
-            # Find sentence boundaries
-            sentences = text_content.split('.')
-            char_count = 0
-            for i, sentence in enumerate(sentences):
-                if char_count <= cursor_pos < char_count + len(sentence) + 1:
-                    self.detector.current_sentence_idx = i
-                    break
-                char_count += len(sentence) + 1
-                
-        except:
-            pass
-    
-    def on_mouse_leave(self, event):
-        """Handle mouse leaving text area"""
-        self.current_word = ""
-        self.detector.current_word = ""
-        self.word_status.config(text="Current word: -")
-        self.text_display.tag_remove("current_word", "1.0", tk.END)
-    
-    def on_key_press(self, event):
-        """Handle keyboard events"""
-        if event.char.lower() == 'd':
-            self.detector.toggle_predictions()
-        elif event.char.lower() == 'q':
-            self.on_close()
-        elif event.keysym == 'Left':
-            self.detector.previous_text()
-        elif event.keysym == 'Right':
-            self.detector.next_text()
-        elif event.char in ['+', '=']:
-            self.detector.confusion_threshold = min(self.detector.confusion_threshold + 0.05, 0.95)
-            self.threshold_status.config(text=f"Threshold: {self.detector.confusion_threshold:.2f}")
-        elif event.char == '-':
-            self.detector.confusion_threshold = max(self.detector.confusion_threshold - 0.05, 0.05)
-            self.threshold_status.config(text=f"Threshold: {self.detector.confusion_threshold:.2f}")
-    
-    def update_display(self):
-        """Update text display with confusion highlighting"""
-        self.text_display.config(state=tk.NORMAL)
-        self.text_display.delete('1.0', tk.END)
-        
-        # Insert text
-        current_text = TRAINING_TEXTS[self.detector.current_text_index]
-        self.text_display.insert('1.0', current_text)
-        
-        # Apply confusion highlighting if enabled
-        if self.detector.show_predictions:
-            self.apply_confusion_highlighting()
-        
-        self.text_display.config(state=tk.DISABLED)
-        self.text_display.yview_moveto(0)
-        
-        # Update status
-        self.text_status.config(text=f"Text: {self.detector.current_text_index + 1}/{len(TRAINING_TEXTS)}")
-        
-        if self.detector.show_predictions:
-            self.prediction_status.config(text="🔍 Predictions: VISIBLE", fg='#4ECDC4')
-        else:
-            self.prediction_status.config(text="🔍 Predictions: HIDDEN", fg='#888888')
-        
-        self.update_confusion_stats()
-    
-    def apply_confusion_highlighting(self):
-        """Apply highlighting based on confusion scores"""
-        text_content = self.text_display.get("1.0", tk.END)
-        
-        # Clear existing tags
-        self.text_display.tag_remove("word_confusion", "1.0", tk.END)
-        self.text_display.tag_remove("sentence_confusion", "1.0", tk.END)
-        
-        # Highlight confused words
-        for word, scores in self.detector.word_confusion_scores.items():
-            if scores and max(scores) > self.detector.confusion_threshold:
-                # Find all occurrences of the word
-                start_pos = "1.0"
-                while True:
-                    pos = self.text_display.search(word, start_pos, tk.END, nocase=True)
-                    if not pos:
-                        break
-                    
-                    # Check if it's a whole word
-                    word_start = self.text_display.index(f"{pos} wordstart")
-                    word_end = self.text_display.index(f"{pos} wordend")
-                    found_word = self.text_display.get(word_start, word_end).strip()
-                    
-                    if found_word.lower() == word.lower():
-                        self.text_display.tag_add("word_confusion", word_start, word_end)
-                    
-                    start_pos = word_end
-        
-        # Highlight confused sentences
-        sentences = text_content.split('.')
-        char_pos = "1.0"
-        
-        for i, sentence in enumerate(sentences):
-            if i in self.detector.sentence_confusion_scores:
-                scores = self.detector.sentence_confusion_scores[i]
-                if scores and max(scores) > self.detector.confusion_threshold:
-                    # Find sentence boundaries
-                    sentence_start = char_pos
-                    sentence_end = self.text_display.index(f"{char_pos} + {len(sentence) + 1} chars")
-                    
-                    # Apply sentence highlighting (lighter than word highlighting)
-                    self.text_display.tag_add("sentence_confusion", sentence_start, sentence_end)
-            
-            # Move to next sentence
-            char_pos = self.text_display.index(f"{char_pos} + {len(sentence) + 1} chars")
-    
-    def update_confusion_stats(self):
-        """Update confusion statistics"""
-        confused_words = sum(1 for word, scores in self.detector.word_confusion_scores.items() 
-                           if scores and max(scores) > self.detector.confusion_threshold)
-        confused_sentences = sum(1 for idx, scores in self.detector.sentence_confusion_scores.items() 
-                               if scores and max(scores) > self.detector.confusion_threshold)
-        
-        self.confusion_status.config(
-            text=f"Confused: Words={confused_words}, Sentences={confused_sentences}"
-        )
-    
-    def track_cursor(self):
-        """Track cursor position for word recording"""
-        if self.active:
-            try:
-                x, y = self.text_display.winfo_pointerxy()
-                widget_x = self.text_display.winfo_rootx()
-                widget_y = self.text_display.winfo_rooty()
-                rel_x = x - widget_x
-                rel_y = y - widget_y
-                
-                if (0 <= rel_x <= self.text_display.winfo_width() and 
-                    0 <= rel_y <= self.text_display.winfo_height()):
-                    event = type('obj', (object,), {'x': rel_x, 'y': rel_y})
-                    self.on_mouse_motion(event)
-            except:
-                pass
-            
-            self.root.after(50, self.track_cursor)
-    
-    def on_close(self):
-        """Clean window close"""
-        self.active = False
+        self.root.quit()
         self.root.destroy()
-    
-    def update_loop(self):
-        """Regular update loop"""
-        if self.active:
-            self.update_confusion_stats()
-            self.threshold_status.config(text=f"Threshold: {self.detector.confusion_threshold:.2f}")
-            
-            # Re-apply highlighting if predictions are visible
-            if self.detector.show_predictions:
-                self.apply_confusion_highlighting()
-            
-            self.root.after(500, self.update_loop)  # Update every 500ms
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description='Real-time EEG/fNIRS confusion detection system'
-    )
-    parser.add_argument(
-        'model_path',
-        help='Path to trained model (.pth file)'
-    )
-    parser.add_argument(
-        '--port',
-        type=int,
-        default=8052,
-        help='UDP port for OSC data (default: 8052)'
-    )
-    parser.add_argument(
-        '--threshold',
-        type=float,
-        default=0.5,
-        help='Initial confusion detection threshold (default: 0.5)'
-    )
+    """Main entry point."""
+    print("\n" + "="*60)
+    print("   LIVE CONFUSION DETECTION SYSTEM")
+    print("="*60)
+    print("\n📡 Starting OSC receiver...")
+    print("Make sure Muse Direct is streaming to this computer's IP address on port 8052")
+    print("\n" + "="*60 + "\n")
     
-    args = parser.parse_args()
-    
-    # Check model file
-    model_path = Path(args.model_path)
-    if not model_path.exists():
-        print(f"Error: Model file not found: {args.model_path}")
-        sys.exit(1)
-    
-    # Create detector
-    detector = RealTimeConfusionDetector(
-        model_path=args.model_path,
-        port=args.port
-    )
-    detector.confusion_threshold = args.threshold
-    
-    # Start system
-    try:
-        detector.start()
-    except Exception as e:
-        print(f"Error: {e}")
-        import traceback
-        traceback.print_exc()
+    root = tk.Tk()
+    app = LiveConfusionDetector(root, port=8052)
+    root.protocol("WM_DELETE_WINDOW", app.on_closing)
+    root.mainloop()
 
 
 if __name__ == "__main__":

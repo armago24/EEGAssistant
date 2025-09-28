@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """
+eegTrainer.py:
 Visualizer for Muse S Athena with EEG and fNIRS (optics) data
 Modified for ML training with confusion detection using mouse selection
 Saves data as NPZ files with event timestamps and selected text

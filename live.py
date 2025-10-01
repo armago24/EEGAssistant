@@ -4,6 +4,7 @@ live.py - Real-time Confusion Detection System
 Combines EEG/fNIRS data collection with neural network inference
 to predict reading confusion in real-time.
 """
+//test
 
 import socket
 import struct

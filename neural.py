@@ -749,7 +749,7 @@ class WordConfusionDetectorNN:
         
         # Find valid baseline regions (active reading, far from events)
         valid_baseline_indices = []
-        min_distance_from_events = 10.0  # Increased from 5.0 seconds
+        min_distance_from_events = 20.0  # Increase to 20s for better separation
         
         for i in range(self.window_samples, len(self.timestamps) - self.window_samples):
             # Must be during active reading (only if reading mask is enabled)
@@ -1111,8 +1111,9 @@ class WordConfusionDetectorNN:
         ).to(self.device)
         
         # Loss and optimizer
-        criterion = nn.CrossEntropyLoss(weight=class_weights)
-        optimizer = torch.optim.AdamW(self.model.parameters(), lr=0.0005, weight_decay=0.05)  # Increased regularization
+        # Add label smoothing to prevent overconfidence
+        criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.1)
+        optimizer = torch.optim.AdamW(self.model.parameters(), lr=0.0005, weight_decay=0.05)
         scheduler = ReduceLROnPlateau(optimizer, mode='min', patience=15, factor=0.5)
         
         # Training loop

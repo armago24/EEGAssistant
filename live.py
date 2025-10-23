@@ -5,8 +5,6 @@ Combines EEG/fNIRS data collection with neural network inference
 to predict reading confusion in real-time.
 """
 
-//github
-
 import socket
 import struct
 import threading
@@ -280,6 +278,24 @@ class WordComplexityAnalyzer:
 # ===========================
 # REAL-TIME CONFUSION DETECTOR
 # ===========================
+#
+# TEMPORAL ALIGNMENT:
+# -------------------
+# Training uses centered 3-second windows around confusion events:
+#   Window = [T_confusion - 1.5s, T_confusion + 1.5s]
+#
+# Live deployment must match this:
+# 1. User reads word at T_read -> Store (word, T_read, position)
+# 2. Wait 1.5 seconds (half of window_duration)
+# 3. At T_read + 1.5s, current 3s buffer contains [T_now - 3.0, T_now]
+# 4. Since T_now = T_read + 1.5, buffer = [T_read - 1.5, T_read + 1.5]
+# 5. This matches training: centered window around reading time
+# 6. Make prediction using entire current buffer
+# 7. Highlight if confidence > threshold
+#
+# Note: fNIRS has 4-6s hemodynamic lag, but training captured rising phase,
+# not peak. Live deployment must use same timing to match trained model.
+# ===========================
 
 class RealTimeConfusionDetector:
     def __init__(self, model_path=None):
@@ -289,21 +305,32 @@ class RealTimeConfusionDetector:
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.model_loaded = False
 
-        # Data buffers - using 512 samples to match model training
-        self.window_size = 512  # 2 seconds at 256 Hz (matches neural.py)
+        # Data buffers - using 3 second windows to match model training
+        self.sample_rate = 256
+        self.window_duration = 3.0  # seconds (matches neural.py)
+        self.window_size = int(self.window_duration * self.sample_rate)  # 768 samples
         self.eeg_buffer = deque(maxlen=self.window_size)
         self.fnirs_buffer = deque(maxlen=self.window_size)
         self.motion_buffer = deque(maxlen=self.window_size)
 
-        # Word tracking with timing (matching neural.py's pre-event offset)
+        # Buffer warmup tracking - CRITICAL FIX
+        self.buffer_ready = False
+        self.first_data_time = None
+        self.warmup_duration = 3.5  # Need 3.5s of real data before predictions
+
+        # Word tracking with timing
         self.current_word = ""
-        self.word_history = deque(maxlen=50)  # Store more history for delayed prediction
-        self.word_reading_history = deque(maxlen=50)  # (word, timestamp, buffer_state)
+        self.word_history = deque(maxlen=100)  # Store more history for delayed prediction
+        self.word_reading_history = deque(maxlen=100)  # (word, timestamp, text_position)
         self.word_predictions = {}
         self.complexity_analyzer = WordComplexityAnalyzer()
 
-        # Timing parameters (matching neural.py)
-        self.pre_event_offset = 2.0  # Match neural.py training offset
+        # Timing parameters: Must match training temporal alignment
+        # Training: window centered at (click_time - 2.0s) with span of 3.0s
+        # This gives [click - 3.5s, click - 0.5s]
+        # Live: Need window centered at reading_time with same 3.0s span
+        # After waiting 1.5s, buffer = [T_read - 1.5s, T_read + 1.5s] = centered window
+        self.pre_event_offset = 1.5  # Half of window_duration - critical for temporal alignment
 
         # Reading state detection
         self.last_word_change_time = time.time()
@@ -311,15 +338,21 @@ class RealTimeConfusionDetector:
         self.cursor_stationary_threshold = 1.0  # seconds
         self.words_per_minute_threshold = 50  # minimum reading speed
 
-        # Confusion tracking
-        self.paragraph_confusion_words = set()
-        self.confusion_threshold = 0.3  # Lower threshold for real-time (was 0.5)
+        # Confusion tracking - store (word, position) tuples to prevent pre-reading highlights
+        self.confused_word_positions = set()  # Set of (word, text_index) tuples
+        self.confusion_threshold = 0.7  # Increased from 0.5 - be conservative to reduce false positives
 
-        # Initialize with zeros
-        for _ in range(self.window_size):
-            self.eeg_buffer.append(np.zeros(4))
-            self.fnirs_buffer.append(np.zeros(8))
-            self.motion_buffer.append(np.zeros(6))
+        # Prediction quality tracking
+        self.recent_predictions = deque(maxlen=50)  # Track recent predictions for sanity checks
+        self.prediction_count = 0
+        self.high_confidence_count = 0
+
+        # Temporal smoothing for predictions
+        self.word_prediction_history = {}  # word_index -> list of (timestamp, probability)
+        self.prediction_smoothing_window = 3.0  # seconds
+
+        # DO NOT pre-fill buffers with zeros - this causes OOD predictions!
+        # Buffers will fill naturally as data arrives
 
         # Feature extraction parameters
         self.sample_rate = 256
@@ -333,7 +366,12 @@ class RealTimeConfusionDetector:
             self.load_model(model_path)
     
     def load_model(self, model_path):
-        """Load pre-trained model and associated components"""
+        """Load pre-trained model and associated components
+
+        IMPORTANT: Model was trained with centered 3s windows around confusion events.
+        Live deployment must use the same window timing: wait 1.5s after reading,
+        then use the current 3s buffer which will be centered on the reading time.
+        """
         try:
             checkpoint = torch.load(model_path, map_location=self.device)
             
@@ -362,16 +400,22 @@ class RealTimeConfusionDetector:
             # Load feature names if available
             self.feature_names = checkpoint.get('feature_names', None)
             
-            # Load window parameters
-            self.window_size = int(checkpoint.get('window_size', 3.0) * checkpoint.get('sample_rate', 256))
-            self.sample_rate = checkpoint.get('sample_rate', 256)
-            
+            # Load window parameters from checkpoint
+            checkpoint_window_size = checkpoint.get('window_size', 3.0)
+            checkpoint_sample_rate = checkpoint.get('sample_rate', 256)
+            checkpoint_window_samples = int(checkpoint_window_size * checkpoint_sample_rate)
+
+            # Update our parameters to match
+            self.window_duration = checkpoint_window_size
+            self.sample_rate = checkpoint_sample_rate
+            self.window_size = checkpoint_window_samples
+
             # Resize buffers if needed
             if len(self.eeg_buffer) != self.window_size:
                 self.eeg_buffer = deque(maxlen=self.window_size)
                 self.fnirs_buffer = deque(maxlen=self.window_size)
                 self.motion_buffer = deque(maxlen=self.window_size)
-                
+
                 # Initialize with zeros
                 for _ in range(self.window_size):
                     self.eeg_buffer.append(np.zeros(4))
@@ -380,19 +424,78 @@ class RealTimeConfusionDetector:
             
             self.model_loaded = True
             print(f"✓ Model loaded successfully from {model_path}")
-            print(f"  Model expects {model_config.get('n_features', 100)} features")
-            
+            print(f"  Model expects {model_config.get('n_features', '?')} features")
+
+            # CRITICAL: Validate feature extraction matches training
+            self._validate_feature_extraction(checkpoint)
+
         except Exception as e:
             print(f"✗ Error loading model: {e}")
             import traceback
             traceback.print_exc()
             self.model_loaded = False
+
+    def _validate_feature_extraction(self, checkpoint):
+        """Validate that live feature extraction matches training"""
+        try:
+            print("\nValidating feature extraction compatibility...")
+
+            # Create dummy data
+            dummy_eeg = np.random.randn(self.window_size, 4)
+            dummy_fnirs = np.random.randn(self.window_size, 8)
+            dummy_word = "test"
+
+            # Preprocess
+            eeg_filtered, fnirs_filtered = self.preprocess_signals(dummy_eeg, dummy_fnirs)
+
+            # Extract features
+            word_features = self.complexity_analyzer.analyze_complexity(dummy_word)
+            extracted_features = self.extract_features(eeg_filtered.T, fnirs_filtered.T, word_features)
+
+            # Check dimensions
+            expected_features = checkpoint.get('model_config', {}).get('n_features', None)
+
+            if expected_features is None:
+                print("  WARNING: Model config missing n_features - cannot validate!")
+                print(f"  Live extraction produces {len(extracted_features)} features")
+            elif len(extracted_features) != expected_features:
+                raise ValueError(
+                    f"Feature dimension MISMATCH!\n"
+                    f"  Model expects: {expected_features} features\n"
+                    f"  Live extracts: {len(extracted_features)} features\n"
+                    f"  This will cause prediction errors!"
+                )
+            else:
+                print(f"  ✓ Feature dimensions match: {len(extracted_features)} features")
+
+            # Validate feature names if available
+            if 'feature_names' in checkpoint and checkpoint['feature_names']:
+                stored_names = checkpoint['feature_names']
+                if len(stored_names) != len(extracted_features):
+                    print(f"  WARNING: Feature count changed ({len(stored_names)} -> {len(extracted_features)})")
+
+            print("  ✓ Feature extraction validation complete\n")
+
+        except Exception as e:
+            print(f"  WARNING: Feature validation failed: {e}")
+            print("  Proceeding anyway, but predictions may be incorrect!\n")
     
     def add_eeg_sample(self, eeg_data):
         """Add EEG sample to buffer thread-safely"""
         if len(eeg_data) == 4:
             with self.lock:
+                # Track first data arrival for warmup
+                if self.first_data_time is None:
+                    self.first_data_time = time.time()
+                    print(f"Data collection started - warming up for {self.warmup_duration}s...")
+
                 self.eeg_buffer.append(np.array(eeg_data))
+
+                # Check if warmup period complete
+                if not self.buffer_ready:
+                    if time.time() - self.first_data_time >= self.warmup_duration:
+                        self.buffer_ready = True
+                        print(f"Buffer ready! Warmup complete ({len(self.eeg_buffer)} samples)")
 
     def add_fnirs_sample(self, fnirs_data):
         """Add fNIRS sample to buffer thread-safely"""
@@ -429,29 +532,20 @@ class RealTimeConfusionDetector:
         self.reading_active = False
         return False
 
-    def update_word_reading_history(self, word):
-        """Update word reading history with current buffer state"""
+    def update_word_reading_history(self, word, text_position):
+        """Update word reading history with timestamp and position"""
         if not word or word == self.current_word:
             return
 
         current_time = time.time()
         self.last_word_change_time = current_time
 
-        # Store word with timestamp and current buffer state
-        with self.lock:
-            # Capture current buffer state for delayed prediction
-            eeg_snapshot = np.vstack(list(self.eeg_buffer)).copy() if len(self.eeg_buffer) == self.window_size else None
-            fnirs_snapshot = np.vstack(list(self.fnirs_buffer)).copy() if len(self.fnirs_buffer) == self.window_size else None
-            motion_snapshot = np.vstack(list(self.motion_buffer)).copy() if len(self.motion_buffer) == self.window_size else None
-
-            if eeg_snapshot is not None and fnirs_snapshot is not None and motion_snapshot is not None:
-                self.word_reading_history.append({
-                    'word': word,
-                    'timestamp': current_time,
-                    'eeg': eeg_snapshot,
-                    'fnirs': fnirs_snapshot,
-                    'motion': motion_snapshot
-                })
+        # Store word with timestamp and text position (no buffer snapshot)
+        self.word_reading_history.append({
+            'word': word,
+            'timestamp': current_time,
+            'text_position': text_position
+        })
 
         self.current_word = word
         self.word_history.append(word)
@@ -460,17 +554,143 @@ class RealTimeConfusionDetector:
         self.detect_reading_state()
 
     def get_delayed_prediction_candidates(self):
-        """Get words that should be predicted based on pre-event offset"""
+        """Get words that should be predicted after sufficient delay for window completion"""
         current_time = time.time()
         candidates = []
 
         for entry in self.word_reading_history:
             time_diff = current_time - entry['timestamp']
             # Check if this word was read approximately pre_event_offset seconds ago
-            if abs(time_diff - self.pre_event_offset) < 0.5:  # Within 0.5 seconds of target delay
-                candidates.append(entry)
+            # Allow window of +/- 0.2 seconds for matching
+            if self.pre_event_offset - 0.2 <= time_diff <= self.pre_event_offset + 0.3:
+                # Check if we haven't already predicted this word
+                word_key = (entry['word'], entry['timestamp'])
+                if word_key not in self.word_predictions:
+                    candidates.append(entry)
 
         return candidates
+
+    def process_delayed_predictions(self):
+        """Process predictions for words using current buffer state after delay"""
+        if not self.model_loaded or not self.buffer_ready:
+            return
+
+        candidates = self.get_delayed_prediction_candidates()
+
+        for entry in candidates:
+            # Verify entry has all required fields
+            if not all(key in entry for key in ['word', 'timestamp', 'text_position']):
+                continue
+
+            word = entry['word']
+            timestamp = entry['timestamp']
+            text_position = entry['text_position']
+
+            try:
+                # Get CURRENT buffer state (after 1.5s delay has elapsed)
+                # Buffer contains last 3.0 seconds: [T_now - 3.0, T_now]
+                # Since T_now = T_read + 1.5, buffer = [T_read - 1.5, T_read + 1.5]
+                # This matches training: centered 3s window around confusion time
+                with self.lock:
+                    if len(self.eeg_buffer) < self.window_size:
+                        continue
+
+                    eeg_snapshot = np.vstack(list(self.eeg_buffer)).copy()
+                    fnirs_snapshot = np.vstack(list(self.fnirs_buffer)).copy()
+                    motion_snapshot = np.vstack(list(self.motion_buffer)).copy()
+
+                # Preprocess the signals
+                eeg_filtered, fnirs_filtered = self.preprocess_signals(eeg_snapshot, fnirs_snapshot)
+
+                # Extract word complexity features
+                word_features = self.complexity_analyzer.analyze_complexity(word)
+
+                # Extract ALL features
+                all_features = self.extract_features(eeg_filtered.T, fnirs_filtered.T, word_features)
+
+                # Scale features if scaler available
+                if self.scaler:
+                    all_features_scaled = self.scaler.transform(all_features.reshape(1, -1))
+                else:
+                    all_features_scaled = all_features.reshape(1, -1)
+
+                # Prepare tensors
+                eeg_tensor = torch.FloatTensor(eeg_filtered.T.copy()).unsqueeze(0).to(self.device)
+                fnirs_tensor = torch.FloatTensor(fnirs_filtered.T.copy()).unsqueeze(0).to(self.device)
+                motion_tensor = torch.FloatTensor(motion_snapshot.T.copy()).unsqueeze(0).to(self.device)
+                features_tensor = torch.FloatTensor(all_features_scaled).to(self.device)
+
+                # Predict
+                with torch.no_grad():
+                    output, _ = self.model(eeg_tensor, fnirs_tensor, motion_tensor, features_tensor)
+                    probs = F.softmax(output, dim=1)
+                    confusion_prob = float(probs[0, 1] + probs[0, 2])
+
+                # Track prediction quality
+                self.prediction_count += 1
+                if confusion_prob > 0.9:
+                    self.high_confidence_count += 1
+                self.recent_predictions.append(confusion_prob)
+
+                # Sanity check: warn if model predicts everything as confused
+                if self.prediction_count >= 20:
+                    high_conf_ratio = self.high_confidence_count / self.prediction_count
+                    if high_conf_ratio > 0.8:
+                        print(f"\n⚠️  WARNING: Model predicting {high_conf_ratio:.0%} of words as highly confused!")
+                        print(f"   This suggests temporal misalignment or model calibration issues.")
+                        print(f"   Recent predictions: {[f'{p:.2f}' for p in list(self.recent_predictions)[-10:]]}\n")
+
+                # Store prediction with timestamp and position
+                word_key = (word, timestamp)
+                self.word_predictions[word_key] = {
+                    'probability': confusion_prob,
+                    'prediction_time': time.time(),
+                    'word': word,
+                    'read_time': timestamp,
+                    'text_position': text_position
+                }
+
+                # Debug output with signal quality indicators
+                if confusion_prob > 0.4:
+                    # Calculate signal quality metrics
+                    eeg_std = np.std(eeg_snapshot)
+                    fnirs_std = np.std(fnirs_snapshot)
+                    buffer_fullness = len(self.eeg_buffer) / self.window_size
+
+                    print(f"PREDICTED '{word}' at {text_position} | "
+                          f"prob={confusion_prob:.3f} | "
+                          f"buffer={buffer_fullness:.0%} | "
+                          f"eeg_std={eeg_std:.2f} | "
+                          f"fnirs_std={fnirs_std:.2f}")
+
+            except Exception as e:
+                print(f"Delayed prediction error for word '{word}': {e}")
+                import traceback
+                traceback.print_exc()
+
+    def get_smoothed_confusion_probability(self, word, current_time):
+        """Get temporally smoothed confusion probability for a word"""
+        # Find all recent predictions for this word
+        recent_probs = []
+
+        for (pred_word, pred_timestamp), pred_data in self.word_predictions.items():
+            if pred_word.lower() == word.lower():
+                time_diff = current_time - pred_data['prediction_time']
+                if time_diff <= self.prediction_smoothing_window:
+                    # Weight by recency (more recent = higher weight)
+                    weight = 1.0 - (time_diff / self.prediction_smoothing_window)
+                    recent_probs.append((pred_data['probability'], weight))
+
+        if not recent_probs:
+            return 0.0
+
+        # Weighted average
+        total_weight = sum(w for _, w in recent_probs)
+        if total_weight == 0:
+            return 0.0
+
+        smoothed_prob = sum(p * w for p, w in recent_probs) / total_weight
+        return smoothed_prob
     
     def preprocess_signals(self, eeg, fnirs):
         """Apply preprocessing to signals - matching neural.py"""
@@ -819,20 +1039,24 @@ class LiveConfusionDetector:
         
         # Training texts
         self.training_texts = [
-            """Epineural cuff electrodes are designed to interface with peripheral nerves by wrapping around the epineurium. These devices utilize biocompatible materials like silicone or polyimide to create a cylindrical structure that gently encompasses the nerve bundle. The electrode contacts, typically made of platinum-iridium or gold, are embedded within the cuff material and positioned to make electrical contact with the nerve fibers through the epineurium. This configuration allows for selective stimulation and recording of neural signals while minimizing invasive penetration of the nerve tissue. The cuff design provides mechanical stability and prevents electrode migration, which is crucial for chronic implantation scenarios in neuroprosthetic applications.""",
-            
-            """The biomechanical properties of neural interfaces significantly impact their long-term functionality and biocompatibility. When designing epineural electrodes, engineers must consider the mechanical mismatch between rigid electronic materials and soft neural tissue. This disparity can lead to chronic inflammation, scar tissue formation, and eventual signal degradation. Advanced fabrication techniques now incorporate flexible substrates and stretchable conductors that better match the Young's modulus of nerve tissue. Additionally, the incorporation of anti-inflammatory coatings and drug-eluting polymers has shown promise in reducing the foreign body response. These innovations aim to create a more stable biological-electrical interface that maintains signal quality over extended implantation periods."""
+            """To look for goal-related hemodynamic signals in the PPC, we acquired fUS images from NHPs using a miniaturized 15-MHz, linear array transducer placed on the dura via a cranial window. The transducer provided a spatial resolution of 100 μm × 100 μm in-plane, slice thicknesses of ~400 μm, covering a plane with a width of 12.8 mm and penetration depth of 16 mm. We positioned the probe surface-normal in a coronal orientation above the PPC (Figures 1A and 1B). We then selected planes of interest for each animal from the volumes available (Figures 1C–1F). Specifically, we chose planes that captured both the lateral and medial banks of the intraparietal sulcus (ips) within a single image and exhibited behaviorally tuned hemodynamic activity. We used a plane-wave imaging sequence at a pulse repetition frequency of 7,500 Hz and compounded frames collected from a 500-ms period each second to form power Doppler images with a 1 Hz refresh rate.""",
+
+"""To resolve goal-specific hemodynamic changes within single trials, we trained two NHPs to perform memory-delayed instructed saccades. We used a similar task design to previous experiments investigating the roles of PPC regions using fMRI blood-oxygen-level-dependent (BOLD) (Kagan et al., 2010; Wilke et al., 2012) and reversible pharmacological inactivation (Christopoulos et al., 2015). Specifically, the monkeys were required to memorize the location of a cue presented in either the left or right hemifield and execute the movement once the center fixation cue extinguished (Figure 2A). The memory phase was chosen to be sufficiently long (from 4.0 to 5.1 s depending on the animals’ training and success rate, with a mean of 4.4 s across sessions) to capture hemodynamic changes. We collected fUS data while each animal (N = 2) performed memory-delayed saccades. We collected 2,441 trials over 16 days (1,209 from monkey H and 1,232 from monkey L).""",
+
+"""We use statistical parametric maps based on the Student’s t test (one sided with false discovery rate [FDR] correction) to visualize patterns of lateralized activity in PPC (Figures 2B and 2G). We observed event-related average (ERA) changes of cerebral blood volume (CBV) throughout the task from localized regions (Figures 2C–2F, 2H, and 2I). Spatial response fields of laterally tuned hemodynamic activity appeared on the lateral bank of ips (i.e., in LIP). The response fields and ERA waveforms were similar between animals and are consistent with previous electrophysiological (Graf and Andersen, 2014) and fMRI BOLD (Wilke et al., 2012) results. Specifically, ERAs from LIP show higher memory phase responses to contralateral (right)- compared to ipsilateral (left)-cued trials (one-sided t test of area under the curve during memory phase, t test p < 0.001). """,
+
+"""Monkey H exhibited a similar direction-tuned response in the presumed medial parietal area (MP), a small patch of cortex on the medial wall of the hemisphere (we did not record this area effect in monkey L, because MP was outside the imaging plane). This tuning supports previous evidence of MP’s role in directional eye movement observed in a previous study (Thier and Andersen, 1998). In contrast, focal regions of microvasculature outside the LIP also showed strong event-related responses to the task onset but were not tuned to target direction (e.g., Figure 2E). """
         ]
         
         # Thread management
         self.running = False
         
     def setup_ui(self):
-        """Create the main UI with text display and debug panel"""
+        """Create the main UI matching eegtrainer.py visual presentation"""
         self.root = tk.Tk()
         self.root.title("Live Confusion Detection System")
-        self.root.geometry("1400x900")
-        
+        self.root.geometry("1200x800")  # Match eegtrainer.py
+
         # Configure dark theme
         self.root.configure(bg='#0a0a0a')
         style = ttk.Style()
@@ -840,221 +1064,248 @@ class LiveConfusionDetector:
         style.configure('Dark.TFrame', background='#1a1a1a')
         style.configure('Dark.TLabel', background='#1a1a1a', foreground='white')
         style.configure('Dark.TButton', background='#2a2a2a', foreground='white')
-        
+
         # Main container
-        main_frame = ttk.Frame(self.root, style='Dark.TFrame')
+        main_frame = tk.Frame(self.root, bg='#0a0a0a')
         main_frame.pack(fill='both', expand=True, padx=10, pady=10)
-        
-        # Left side - Text display
-        left_frame = ttk.Frame(main_frame, style='Dark.TFrame')
-        left_frame.pack(side='left', fill='both', expand=True, padx=(0, 10))
-        
-        # Title
-        title_label = ttk.Label(left_frame, text="LIVE CONFUSION DETECTION", 
-                               font=('Arial', 24, 'bold'), style='Dark.TLabel')
-        title_label.pack(pady=(0, 10))
-        
-        # Instructions
-        instructions = ttk.Label(left_frame, 
-            text="Read the text below. The system will predict confusing words in real-time.\n" +
-                 "Press 'H' to toggle highlighting | 'D' for dummy mode | ←/→ to change text",
-            style='Dark.TLabel', font=('Arial', 12))
-        instructions.pack(pady=(0, 10))
-        
-        # Text display
-        text_frame = tk.Frame(left_frame, bg='#0a0a0a', highlightthickness=2, 
-                             highlightbackground='#3a3a3a')
-        text_frame.pack(fill='both', expand=True)
-        
-        self.text_widget = tk.Text(text_frame, wrap='word', font=('Georgia', 16),
-                                  bg='#0a0a0a', fg='white', insertbackground='white',
-                                  selectbackground='#4444ff', selectforeground='white',
-                                  padx=20, pady=20, spacing1=10, spacing2=8, spacing3=10)
-        self.text_widget.pack(fill='both', expand=True)
-        
+
+        # Header (matching eegtrainer.py style)
+        header_frame = tk.Frame(main_frame, bg='#1a1a1a', height=80)
+        header_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
+        header_frame.pack_propagate(False)
+
+        tk.Label(header_frame,
+                text="LIVE CONFUSION DETECTION",
+                font=('Arial', 24, 'bold'),
+                fg='#FFD93D',
+                bg='#1a1a1a').pack(pady=10)
+
+        tk.Label(header_frame,
+                text="H: Toggle Highlighting | D: Dummy Mode | Left/Right: Change Text | Space: Toggle Debug",
+                font=('Arial', 14),
+                fg='#4ECDC4',
+                bg='#1a1a1a').pack()
+
+        # Text display frame (matching eegtrainer.py exactly)
+        text_frame = tk.Frame(main_frame, bg='#0a0a0a')
+        text_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+
+        self.text_widget = tk.Text(text_frame,
+                                   font=('Georgia', 28, 'normal'),  # Match eegtrainer.py
+                                   bg='#0a0a0a',
+                                   fg='white',
+                                   wrap=tk.WORD,
+                                   padx=40,  # Match eegtrainer.py
+                                   pady=30,  # Match eegtrainer.py
+                                   spacing1=10,
+                                   spacing2=8,
+                                   spacing3=10,
+                                   insertwidth=0,
+                                   highlightthickness=0,
+                                   borderwidth=0,
+                                   relief=tk.FLAT,
+                                   cursor="hand2")
+        self.text_widget.pack(fill=tk.BOTH, expand=True)
+
         # Configure text tags
-        self.text_widget.tag_configure('confusion_predicted', background='#ff6b6b', foreground='black')
+        self.text_widget.tag_configure('confusion_predicted', background='#ff6b6b', foreground='white')
         self.text_widget.tag_configure('manual_highlight', background='#4ecdc4', foreground='black')
         self.text_widget.tag_configure('current_word', underline=True, foreground='#45b7d1')
-        
-        # Right side - Debug panel
-        self.create_debug_panel(main_frame)
-        
+
+        # Status frame at bottom (matching eegtrainer.py style)
+        status_frame = tk.Frame(main_frame, bg='#1a1a1a', height=120)
+        status_frame.pack(fill=tk.X, padx=10, pady=(5, 10))
+        status_frame.pack_propagate(False)
+
+        # Status labels (compact, like eegtrainer.py)
+        self.text_status = tk.Label(status_frame,
+                                   text="Text: 1/3",
+                                   font=('Arial', 16),
+                                   fg='#96CEB4',
+                                   bg='#1a1a1a')
+        self.text_status.pack(side=tk.LEFT, padx=20, pady=10)
+
+        self.model_status = tk.Label(status_frame,
+                                    text="Model: Not Loaded",
+                                    font=('Arial', 16),
+                                    fg='#888888',
+                                    bg='#1a1a1a')
+        self.model_status.pack(side=tk.LEFT, padx=20, pady=10)
+
+        self.warmup_status = tk.Label(status_frame,
+                                     text="Waiting for data...",
+                                     font=('Arial', 16, 'bold'),
+                                     fg='#888888',
+                                     bg='#1a1a1a')
+        self.warmup_status.pack(side=tk.LEFT, padx=20, pady=10)
+
+        self.prediction_status = tk.Label(status_frame,
+                                         text="Predictions: 0",
+                                         font=('Arial', 16),
+                                         fg='#E74C3C',
+                                         bg='#1a1a1a')
+        self.prediction_status.pack(side=tk.LEFT, padx=20, pady=10)
+
+        self.word_status = tk.Label(status_frame,
+                                   text="Current word: -",
+                                   font=('Arial', 14, 'italic'),
+                                   fg='#FFD93D',
+                                   bg='#1a1a1a')
+        self.word_status.pack(side=tk.RIGHT, padx=20, pady=5)
+
+        # Debug panel (togglable, hidden by default)
+        self.debug_panel_visible = False
+        self.debug_window = None
+
         # Load initial text
         self.load_text(0)
-        
+
         # Bind events
         self.text_widget.bind('<Motion>', self.on_mouse_move)
         self.text_widget.bind('<Button-1>', self.on_left_click)
         self.text_widget.bind('<Button-3>', self.on_right_click)
         self.root.bind('<Key>', self.on_key_press)
-        
+
         # Start cursor tracking
         self.root.after(50, self.track_cursor)
     
-    def create_debug_panel(self, parent):
-        """Create the debug information panel"""
-        debug_frame = ttk.Frame(parent, style='Dark.TFrame', width=400)
-        debug_frame.pack(side='right', fill='y', padx=(10, 0))
-        debug_frame.pack_propagate(False)
-        
-        # Title
-        title = ttk.Label(debug_frame, text="DEBUG PANEL", 
-                         font=('Arial', 18, 'bold'), style='Dark.TLabel')
-        title.pack(pady=(0, 20))
-        
-        # Debug info sections
-        self.debug_info = {}
-        
-        # 1. Current word
-        self.add_debug_section(debug_frame, "1. Current Word", "current_word", "None")
-        
-        # 2. Signal values
-        self.add_debug_section(debug_frame, "2. Signal Values", "signals", 
-                              "EEG: [0, 0, 0, 0]\nfNIRS: [0, 0, 0, 0, 0, 0, 0, 0]\nMotion: [0, 0, 0, 0, 0, 0]")
-        
-        # 3. Last three words
-        self.add_debug_section(debug_frame, "3. Last Three Words", "word_history", "None")
-        
-        # 4. Model status
-        self.add_debug_section(debug_frame, "4. Neural Net Status", "model_status", "Not loaded")
-        
-        # 5. Data flow status
-        self.add_debug_section(debug_frame, "5. Data Flow", "data_flow", "Not connected")
-        
-        # 6. Confused words
-        self.add_debug_section(debug_frame, "6. Predicted Confusions", "confused_words", "None")
-        
-        # 7. Dummy highlighting button
-        dummy_frame = ttk.Frame(debug_frame, style='Dark.TFrame')
-        dummy_frame.pack(fill='x', pady=10)
-        
-        dummy_label = ttk.Label(dummy_frame, text="7. Test Highlighting", 
-                               font=('Arial', 12, 'bold'), style='Dark.TLabel')
-        dummy_label.pack(anchor='w')
-        
-        self.dummy_button = ttk.Button(dummy_frame, text="Enable Dummy Mode",
-                                      command=self.toggle_dummy_mode,
-                                      style='Dark.TButton')
-        self.dummy_button.pack(pady=5)
-        
-        # Load model button
-        load_button = ttk.Button(debug_frame, text="Load Model",
-                               command=self.load_model_dialog,
-                               style='Dark.TButton')
-        load_button.pack(pady=10)
-        
-    def add_debug_section(self, parent, title, key, initial_value):
-        """Add a debug information section"""
-        frame = ttk.Frame(parent, style='Dark.TFrame')
-        frame.pack(fill='x', pady=10)
-        
-        label = ttk.Label(frame, text=title, font=('Arial', 12, 'bold'), 
-                         style='Dark.TLabel')
-        label.pack(anchor='w')
-        
-        value_label = ttk.Label(frame, text=initial_value, style='Dark.TLabel',
-                               font=('Consolas', 10), wraplength=350)
-        value_label.pack(anchor='w', padx=(10, 0))
-        
-        self.debug_info[key] = value_label
     
     def update_debug_info(self):
-        """Update debug panel information"""
-        # 1. Current word
-        self.debug_info['current_word'].config(text=self.current_word or "None")
-        
-        # 2. Signal values
-        signal_text = f"EEG: [{', '.join(f'{x:.1f}' for x in self.latest_eeg)}]\n"
-        signal_text += f"fNIRS: [{', '.join(f'{x:.1f}' for x in self.latest_fnirs[:4])}...]\n"
-        signal_text += f"Motion: [{', '.join(f'{x:.1f}' for x in self.latest_motion[:3])}...]"
-        self.debug_info['signals'].config(text=signal_text)
-        
-        # 3. Last three words with complexity
-        if self.last_three_words:
-            word_text = ""
-            for word in self.last_three_words:
-                complexity = self.detector.complexity_analyzer.analyze_complexity(word)
-                word_text += f"{word}: grade={complexity['estimated_grade_level']:.1f}\n"
-            self.debug_info['word_history'].config(text=word_text.strip())
-        
-        # 4. Model status
-        status = "✓ Loaded" if self.detector.model_loaded else "✗ Not loaded"
-        self.debug_info['model_status'].config(text=status)
-        
-        # 5. Data flow
-        flow_status = "✓ Flowing" if self.data_flowing else "✗ Not flowing"
-        self.debug_info['data_flow'].config(text=flow_status)
-        
-        # 6. Confused words
-        if self.detector.paragraph_confusion_words:
-            confused_text = ", ".join(sorted(self.detector.paragraph_confusion_words)[:5])
-            if len(self.detector.paragraph_confusion_words) > 5:
-                confused_text += f" (+{len(self.detector.paragraph_confusion_words)-5} more)"
-        else:
-            confused_text = "None"
-        self.debug_info['confused_words'].config(text=confused_text)
+        """Update status bar information"""
+        # Update text status
+        if hasattr(self, 'text_status'):
+            self.text_status.config(text=f"Text: {self.current_paragraph_index + 1}/{len(self.training_texts)}")
+
+        # Update model status
+        if hasattr(self, 'model_status'):
+            if self.detector.model_loaded:
+                self.model_status.config(text="Model: Loaded", fg='#96CEB4')
+            else:
+                self.model_status.config(text="Model: Not Loaded", fg='#888888')
+
+        # Update warmup status
+        if hasattr(self, 'warmup_status'):
+            if self.detector.buffer_ready:
+                if self.data_flowing:
+                    self.warmup_status.config(text="READY - Predicting", fg='#96CEB4')
+                else:
+                    self.warmup_status.config(text="Buffer Ready", fg='#FFD93D')
+            elif self.detector.first_data_time:
+                elapsed = time.time() - self.detector.first_data_time
+                remaining = max(0, self.detector.warmup_duration - elapsed)
+                self.warmup_status.config(text=f"Warming up... {remaining:.1f}s", fg='#FFD93D')
+            else:
+                self.warmup_status.config(text="Waiting for data...", fg='#888888')
+
+        # Update prediction count
+        if hasattr(self, 'prediction_status'):
+            n_predictions = len(self.detector.confused_word_positions)
+            self.prediction_status.config(text=f"Confused Words: {n_predictions}")
+
+        # Update current word
+        if hasattr(self, 'word_status'):
+            self.word_status.config(text=f"Current word: {self.current_word if self.current_word else '-'}")
     
     def load_text(self, index):
         """Load a training text"""
         self.current_paragraph_index = index
         self.text_widget.delete(1.0, tk.END)
         self.text_widget.insert(1.0, self.training_texts[index])
-        
+
         # Reset confusion tracking
-        self.detector.paragraph_confusion_words.clear()
+        self.detector.confused_word_positions.clear()
         self.word_confusion_map.clear()
         self.highlighted_words.clear()
         self.manual_highlights.clear()
+
+        # Clear prediction history
+        self.detector.word_predictions.clear()
+        self.detector.word_reading_history.clear()
     
     def track_cursor(self):
         """Track cursor position and current word"""
         if not self.running:
             return
-            
+
         try:
+            # Process delayed predictions first
+            if self.detector.model_loaded and self.data_flowing:
+                self.detector.process_delayed_predictions()
+
             # Get cursor position
             cursor_pos = self.text_widget.index(tk.CURRENT)
-            
+
             # Get word at cursor
             word_start = self.text_widget.index(f"{cursor_pos} wordstart")
             word_end = self.text_widget.index(f"{cursor_pos} wordend")
             word = self.text_widget.get(word_start, word_end).strip()
-            
+
             if word and word != self.current_word:
                 # Update current word
                 self.current_word = word
                 self.last_three_words.append(word)
-                
+
                 # Clear previous current word highlighting
                 self.text_widget.tag_remove('current_word', 1.0, tk.END)
                 self.text_widget.tag_add('current_word', word_start, word_end)
-                
-                # Predict confusion for this word
+
+                # Store word for delayed prediction with its text position
                 if self.detector.model_loaded and self.data_flowing:
-                    prob, pred_class = self.detector.predict_confusion(word)
-                    
-                    # Store prediction
-                    word_index = self.text_widget.index(word_start)
-                    self.word_confusion_map[word_index] = prob
-                    
-                    # Update confusion set if above threshold
-                    if prob > self.detector.confusion_threshold:
-                        self.detector.paragraph_confusion_words.add(word)
-                        
-                        # Highlight if enabled
-                        if self.highlighting_enabled and word_index not in self.highlighted_words:
-                            self.text_widget.tag_add('confusion_predicted', word_start, word_end)
-                            self.highlighted_words.add(word_index)
-            
+                    self.detector.update_word_reading_history(word, word_start)
+
+            # Update highlighting based on smoothed predictions
+            if self.detector.model_loaded and self.highlighting_enabled:
+                self.update_confusion_highlighting()
+
             # Update debug panel
             self.update_debug_info()
-            
+
         except Exception as e:
             print(f"Cursor tracking error: {e}")
-        
+
         # Schedule next update
         self.root.after(50, self.track_cursor)
+
+    def update_confusion_highlighting(self):
+        """Update text highlighting based on confirmed confused words at specific positions"""
+        current_time = time.time()
+
+        # Check for NEW confusing words and add their positions to the persistent set
+        for (word, timestamp), pred_data in self.detector.word_predictions.items():
+            smoothed_prob = self.detector.get_smoothed_confusion_probability(word, current_time)
+
+            if smoothed_prob > self.detector.confusion_threshold:
+                # Add this specific word position (not all instances of the word)
+                text_position = pred_data.get('text_position')
+                if text_position:
+                    self.detector.confused_word_positions.add((word, text_position))
+
+        # Now highlight ONLY the specific positions that were predicted as confusing
+        self.text_widget.tag_remove('confusion_predicted', 1.0, tk.END)
+        self.highlighted_words.clear()
+
+        # Validate and clean up confused_word_positions
+        valid_positions = set()
+
+        for word, position in self.detector.confused_word_positions:
+            try:
+                # Verify position is still valid in current text
+                word_start = self.text_widget.index(f"{position} wordstart")
+                word_end = self.text_widget.index(f"{position} wordend")
+
+                # Verify the word at this position matches what was predicted
+                actual_word = self.text_widget.get(word_start, word_end).strip()
+                if actual_word.lower() == word.lower():
+                    self.text_widget.tag_add('confusion_predicted', word_start, word_end)
+                    self.highlighted_words.add(position)
+                    valid_positions.add((word, position))
+                # If word doesn't match, position is stale - don't add to valid_positions
+            except tk.TclError:
+                # Position no longer valid (text changed) - don't add to valid_positions
+                pass
+
+        # Update confused_word_positions to only keep valid positions
+        self.detector.confused_word_positions = valid_positions
     
     def on_mouse_move(self, event):
         """Handle mouse movement"""
@@ -1119,6 +1370,8 @@ class LiveConfusionDetector:
             self.toggle_highlighting()
         elif event.char.lower() == 'd':
             self.toggle_dummy_mode()
+        elif event.char == ' ':
+            self.toggle_debug_window()
         elif event.keysym == 'Left':
             new_idx = (self.current_paragraph_index - 1) % len(self.training_texts)
             self.load_text(new_idx)
@@ -1131,36 +1384,178 @@ class LiveConfusionDetector:
     def toggle_highlighting(self):
         """Toggle confusion highlighting"""
         self.highlighting_enabled = not self.highlighting_enabled
-        
+
         if self.highlighting_enabled:
-            # Show all predicted confusions
-            for word_idx, prob in self.word_confusion_map.items():
-                if prob > self.detector.confusion_threshold:
-                    word_start = word_idx
-                    word_end = self.text_widget.index(f"{word_idx} wordend")
-                    self.text_widget.tag_add('confusion_predicted', word_start, word_end)
-            print("✓ Highlighting enabled")
+            # Trigger immediate update
+            self.update_confusion_highlighting()
+            print("Highlighting enabled - predictions will appear with 1.5s delay")
         else:
             # Remove all confusion highlights
             self.text_widget.tag_remove('confusion_predicted', 1.0, tk.END)
-            print("✗ Highlighting disabled")
+            self.highlighted_words.clear()
+            print("Highlighting disabled")
     
     def toggle_dummy_mode(self):
         """Toggle dummy highlighting mode"""
         self.dummy_highlighting_enabled = not self.dummy_highlighting_enabled
-        
+
         if self.dummy_highlighting_enabled:
-            self.dummy_button.config(text="Disable Dummy Mode")
-            self.text_widget.config(cursor="hand2")
-            print("✓ Dummy highlighting mode enabled - Click words or right-click sentences")
+            print("Dummy highlighting mode enabled - Click words or right-click sentences")
         else:
-            self.dummy_button.config(text="Enable Dummy Mode")
-            self.text_widget.config(cursor="xterm")
             # Clear manual highlights
             self.text_widget.tag_remove('manual_highlight', 1.0, tk.END)
             self.manual_highlights.clear()
-            print("✗ Dummy highlighting mode disabled")
-    
+            print("Dummy highlighting mode disabled")
+
+    def toggle_debug_window(self):
+        """Toggle debug information window"""
+        if self.debug_window and self.debug_window.winfo_exists():
+            # Close existing debug window
+            self.debug_window.destroy()
+            self.debug_window = None
+            self.debug_panel_visible = False
+            print("Debug panel closed")
+        else:
+            # Create debug window
+            self.debug_window = tk.Toplevel(self.root)
+            self.debug_window.title("Debug Information")
+            self.debug_window.geometry("500x700")
+            self.debug_window.configure(bg='#1a1a1a')
+
+            # Create debug info display
+            debug_frame = tk.Frame(self.debug_window, bg='#1a1a1a')
+            debug_frame.pack(fill='both', expand=True, padx=20, pady=20)
+
+            title = tk.Label(debug_frame, text="DEBUG PANEL",
+                           font=('Arial', 18, 'bold'), fg='#FFD93D', bg='#1a1a1a')
+            title.pack(pady=(0, 20))
+
+            # Create scrollable text widget for debug info
+            self.debug_text = scrolledtext.ScrolledText(debug_frame,
+                                                        font=('Consolas', 10),
+                                                        bg='#0a0a0a',
+                                                        fg='#96CEB4',
+                                                        wrap=tk.WORD,
+                                                        height=35)
+            self.debug_text.pack(fill='both', expand=True)
+
+            # Load model button
+            load_button = tk.Button(debug_frame, text="Load Model",
+                                   command=self.load_model_dialog,
+                                   bg='#2a2a2a', fg='white',
+                                   font=('Arial', 12))
+            load_button.pack(pady=10)
+
+            self.debug_panel_visible = True
+            print("Debug panel opened")
+
+            # Start updating debug window
+            self.update_debug_window()
+
+    def update_debug_window(self):
+        """Update debug window content"""
+        if not self.debug_panel_visible or not self.debug_window or not self.debug_window.winfo_exists():
+            return
+
+        try:
+            # Build debug info text
+            debug_info = []
+            debug_info.append("=" * 50)
+            debug_info.append("LIVE CONFUSION DETECTION - DEBUG PANEL")
+            debug_info.append("=" * 50)
+            debug_info.append("")
+
+            # 1. Current word
+            debug_info.append("1. CURRENT WORD:")
+            debug_info.append(f"   {self.current_word if self.current_word else 'None'}")
+            debug_info.append("")
+
+            # 2. Signal values
+            debug_info.append("2. SIGNAL VALUES:")
+            debug_info.append(f"   EEG: [{', '.join(f'{x:.1f}' for x in self.latest_eeg)}]")
+            debug_info.append(f"   fNIRS: [{', '.join(f'{x:.1f}' for x in self.latest_fnirs)}]")
+            debug_info.append(f"   Motion: [{', '.join(f'{x:.1f}' for x in self.latest_motion)}]")
+            debug_info.append("")
+
+            # 3. Last three words
+            debug_info.append("3. LAST THREE WORDS:")
+            if self.last_three_words:
+                current_time = time.time()
+                for word in self.last_three_words:
+                    complexity = self.detector.complexity_analyzer.analyze_complexity(word)
+                    prob = self.detector.get_smoothed_confusion_probability(word, current_time)
+                    debug_info.append(f"   {word}: grade={complexity['estimated_grade_level']:.1f}, conf={prob:.2f}")
+            else:
+                debug_info.append("   None")
+            debug_info.append("")
+
+            # 4. Model status
+            debug_info.append("4. MODEL STATUS:")
+            if self.detector.model_loaded:
+                n_predictions = len(self.detector.word_predictions)
+                n_candidates = len(self.detector.get_delayed_prediction_candidates())
+                debug_info.append(f"   Loaded: Yes")
+                debug_info.append(f"   Predictions made: {n_predictions}")
+                debug_info.append(f"   Pending predictions: {n_candidates}")
+            else:
+                debug_info.append("   Loaded: No")
+            debug_info.append("")
+
+            # 5. Data flow
+            debug_info.append("5. DATA FLOW:")
+            debug_info.append(f"   Status: {'Flowing' if self.data_flowing else 'Not flowing'}")
+            if self.data_flowing and self.detector.model_loaded:
+                buffer_fill = len(self.detector.eeg_buffer) / self.detector.window_size
+                debug_info.append(f"   Buffer fill: {buffer_fill:.0%}")
+            debug_info.append("")
+
+            # 6. Buffer status
+            debug_info.append("6. BUFFER STATUS:")
+            debug_info.append(f"   Ready: {self.detector.buffer_ready}")
+            if self.detector.first_data_time:
+                elapsed = time.time() - self.detector.first_data_time
+                debug_info.append(f"   Data collection time: {elapsed:.1f}s")
+            debug_info.append(f"   EEG buffer size: {len(self.detector.eeg_buffer)}/{self.detector.window_size}")
+            debug_info.append("")
+
+            # 7. Confused words
+            debug_info.append("7. PREDICTED CONFUSED WORDS:")
+            if self.detector.confused_word_positions:
+                current_time = time.time()
+                word_probs = []
+                unique_words = set(word for word, pos in self.detector.confused_word_positions)
+                for word in unique_words:
+                    prob = self.detector.get_smoothed_confusion_probability(word, current_time)
+                    word_probs.append((word, prob))
+
+                word_probs.sort(key=lambda x: x[1], reverse=True)
+
+                for word, prob in word_probs[:10]:
+                    debug_info.append(f"   {word}: {prob:.3f}")
+
+                if len(unique_words) > 10:
+                    debug_info.append(f"   ... and {len(unique_words)-10} more")
+            else:
+                debug_info.append("   None")
+            debug_info.append("")
+
+            # 8. Reading state
+            debug_info.append("8. READING STATE:")
+            debug_info.append(f"   Active: {self.detector.reading_active}")
+            debug_info.append(f"   Time since last word: {time.time() - self.detector.last_word_change_time:.1f}s")
+            debug_info.append("")
+
+            # Update debug text widget
+            self.debug_text.delete(1.0, tk.END)
+            self.debug_text.insert(1.0, "\n".join(debug_info))
+
+            # Schedule next update
+            if self.debug_panel_visible:
+                self.root.after(100, self.update_debug_window)
+
+        except Exception as e:
+            print(f"Debug window update error: {e}")
+
     def load_model_dialog(self):
         """Open file dialog to load model"""
         filename = filedialog.askopenfilename(
@@ -1225,6 +1620,11 @@ class LiveConfusionDetector:
         print("  D - Toggle dummy highlighting mode")
         print("  ←/→ - Change text passage")
         print("  Q - Quit application")
+        print("\nIMPORTANT:")
+        print("  System requires 3.5s buffer warmup before making predictions.")
+        print("  After warmup, predictions use 1.5s delay to match training temporal alignment.")
+        print("  Words will be highlighted ~1.5 seconds after you read them.")
+        print("  Confusion threshold set to 70% to reduce false positives.")
         print("\n✓ System ready!")
         
         # Setup and run UI

@@ -395,8 +395,9 @@ class TeleprompterWindow:
     def on_mouse_motion(self, event):
         """Track cursor position over text with return sweep detection.
         
-        OPTIMIZED: Uses pre-calculated word positions to reduce Tkinter calls
-        from 4+ down to 1, making cursor tracking much more responsive.
+        OPTIMIZED: Uses pre-calculated word positions + INTERPOLATION.
+        When cursor jumps over words (macOS drops motion events), we fill
+        in the skipped words to ensure continuous tracking for ML data.
         """
         cursor_x = event.x
         
@@ -424,14 +425,29 @@ class TeleprompterWindow:
             col = int(index.split('.')[1])
             
             # Binary search for word (pure Python, O(log n), very fast)
-            word_idx = self._find_word_at_char(col)
+            new_word_idx = self._find_word_at_char(col)
             
             # Only update if we're on a different word
-            if word_idx != self.current_word_index and word_idx >= 0:
-                _, _, word, tk_start, tk_end = self.word_positions[word_idx]
+            if new_word_idx >= 0 and new_word_idx != self.current_word_index:
+                old_idx = self.current_word_index
+                
+                # INTERPOLATION: If we jumped FORWARD over words, fill them in
+                # This handles dropped motion events during fast reading
+                if old_idx >= 0 and new_word_idx > old_idx + 1:
+                    for i in range(old_idx + 1, new_word_idx):
+                        _, _, skipped_word, _, _ = self.word_positions[i]
+                        # Update current_word for each skipped word
+                        # This ensures EEG samples get tagged with all words read
+                        self.current_word = skipped_word
+                        self.parent.current_word = skipped_word
+                        print(f"📍 Word: {skipped_word} (filled)")
+                
+                # Now update to the actual current word
+                _, _, word, tk_start, tk_end = self.word_positions[new_word_idx]
                 
                 self.current_word = word
                 self.parent.current_word = word
+                print(f"📍 Word: {word}")
                 
                 # Update underline: remove old, add new
                 if self.current_word_start and self.current_word_end:
@@ -442,7 +458,7 @@ class TeleprompterWindow:
                 self.text_display.tag_add("current_word", tk_start, tk_end)
                 self.current_word_start = tk_start
                 self.current_word_end = tk_end
-                self.current_word_index = word_idx
+                self.current_word_index = new_word_idx
                 
                 # Update status label
                 self.word_status.config(text=f"Current word: {word}")
@@ -561,7 +577,11 @@ class TeleprompterWindow:
             self.recording_status.config(text="⏺ NOT RECORDING", fg='#888888')
     
     def track_cursor(self):
-        """Backup cursor tracking (Motion events handle most cases, this is fallback)"""
+        """High-frequency cursor polling to catch positions missed by motion events.
+        
+        macOS drops motion events when cursor moves fast. Polling at 60Hz catches
+        more intermediate positions, and interpolation fills in the rest.
+        """
         if self.active:
             try:
                 x, y = self.text_display.winfo_pointerxy()
@@ -577,8 +597,8 @@ class TeleprompterWindow:
             except:
                 pass
             
-            # Slower poll since <Motion> events handle most tracking
-            self.root.after(100, self.track_cursor)
+            # High frequency polling (60 Hz) to minimize missed words
+            self.root.after(16, self.track_cursor)
     
     def on_close(self):
         """Clean window close"""

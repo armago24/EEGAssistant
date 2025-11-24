@@ -58,8 +58,19 @@ class TeleprompterWindow:
         
         # Cursor tracking
         self.current_word = ""
-        self.cursor_update_interval = 50
-        self.last_cursor_update = 0
+        
+        # Track previous word position for efficient tag removal
+        self.current_word_start = None
+        self.current_word_end = None
+        
+        # Pre-calculated word positions for FAST lookup (avoids slow Tkinter calls)
+        self.word_positions = []  # [(char_start, char_end, word, tk_start, tk_end), ...]
+        self.current_word_index = -1
+        
+        # Return sweep detection (when cursor moves back to start of next line)
+        self.last_cursor_x = 0
+        self.in_return_sweep = False
+        self.return_sweep_threshold = 150  # pixels - leftward jump triggers return sweep
         
         # UI Setup
         self._setup_ui()
@@ -114,6 +125,8 @@ class TeleprompterWindow:
         
         # Configure selection colors
         self.text_display.tag_configure("selection", background="#4444ff", foreground="white")
+        self.text_display.tag_configure("sentence_highlight", background="#664488", foreground="white")
+        self.text_display.tag_configure("current_word", underline=True, foreground="#FFD93D")
         
         # Status frame
         status_frame = tk.Frame(self.root, bg='#1a1a1a', height=120)
@@ -184,6 +197,53 @@ class TeleprompterWindow:
         self.text_display.bind('<Button-3>', self.on_right_click)
         self.text_display.bind('<Button-2>', self.on_right_click)
     
+    def _build_word_index(self):
+        """Pre-calculate word positions for FAST cursor tracking.
+        
+        This eliminates 3 slow Tkinter calls per mouse motion by pre-computing
+        word boundaries when text is loaded.
+        """
+        self.word_positions = []
+        text = TRAINING_TEXTS[self.parent.current_text_index]
+        
+        i = 0
+        while i < len(text):
+            # Skip whitespace
+            while i < len(text) and text[i].isspace():
+                i += 1
+            if i >= len(text):
+                break
+            
+            # Find word end
+            start = i
+            while i < len(text) and not text[i].isspace():
+                i += 1
+            
+            word = text[start:i]
+            # Pre-compute Tkinter indices (line 1 since no newlines in text)
+            tk_start = f"1.{start}"
+            tk_end = f"1.{i}"
+            self.word_positions.append((start, i, word, tk_start, tk_end))
+        
+        self.current_word_index = -1
+    
+    def _find_word_at_char(self, char_pos):
+        """Binary search to find word index at character position. O(log n)."""
+        if not self.word_positions:
+            return -1
+        
+        left, right = 0, len(self.word_positions) - 1
+        while left <= right:
+            mid = (left + right) // 2
+            start, end = self.word_positions[mid][:2]
+            if char_pos < start:
+                right = mid - 1
+            elif char_pos >= end:
+                left = mid + 1
+            else:
+                return mid
+        return -1
+    
     def on_left_down(self, event):
         """Start text selection on left mouse down"""
         if not self.labeling_mode:
@@ -220,7 +280,7 @@ class TeleprompterWindow:
             tk.messagebox.showinfo("Not Recording", "Start recording first before marking confusion events.")
             return
         
-        # Get selected text
+        # Get selected text with word expansion
         try:
             if self.text_display.compare(self.selection_start, "<", self.selection_end):
                 start = self.selection_start
@@ -229,13 +289,44 @@ class TeleprompterWindow:
                 start = self.selection_end
                 end = self.selection_start
             
-            selected_text = self.text_display.get(start, end).strip()
+            # Expand selection to full word boundaries
+            expanded_start = self.text_display.index(f"{start} wordstart")
+            expanded_end = self.text_display.index(f"{end} wordend")
+            
+            # Get the expanded text
+            selected_text = self.text_display.get(expanded_start, expanded_end).strip()
             
             if selected_text:
+                # Update visual selection to show expanded range
+                self.text_display.tag_remove("selection", "1.0", tk.END)
+                self.text_display.tag_add("selection", expanded_start, expanded_end)
+                
+                # Extract individual words (filter out empty strings and punctuation-only)
+                words = [w.strip() for w in selected_text.split() if w.strip() and any(c.isalnum() for c in w)]
+                
+                # Calculate character positions for unique identification
+                full_text = self.text_display.get("1.0", tk.END)
+                char_start = len(self.text_display.get("1.0", expanded_start))
+                char_end = len(self.text_display.get("1.0", expanded_end))
+                
+                # Build event data with full info
+                event_data = {
+                    'text': selected_text,           # The full selected text
+                    'words': words,                   # List of individual words
+                    'char_start': char_start,         # Character offset from text start
+                    'char_end': char_end,             # Character offset end
+                    'word_count': len(words)
+                }
+                
                 # Record the confusion event
-                self.parent.record_event('word_confusion', selected_text)
+                self.parent.record_event('word_confusion', event_data)
                 self.flash_event("WORD", selected_text)
-                self.last_click_label.config(text=f"Last marked: '{selected_text[:30]}...' (word confusion)")
+                
+                # Display words in status
+                words_preview = ', '.join(words[:3])
+                if len(words) > 3:
+                    words_preview += f'... ({len(words)} words)'
+                self.last_click_label.config(text=f"Last marked: [{words_preview}] (word confusion)")
                 
                 # Clear selection after brief delay
                 self.root.after(500, lambda: self.text_display.tag_remove("selection", "1.0", tk.END))
@@ -279,32 +370,82 @@ class TeleprompterWindow:
             sentence = text_content[prev_period:next_period].strip()
             
             if sentence:
-                # Record the event
-                self.parent.record_event('sentence_confusion', sentence)
-                self.flash_event("SENTENCE", sentence)
+                # Convert character offsets back to Text widget indices for highlighting
+                start_idx = self.text_display.index(f"1.0 + {prev_period} chars")
+                end_idx = self.text_display.index(f"1.0 + {next_period} chars")
+                
+                # Highlight the sentence
+                self.text_display.tag_remove("sentence_highlight", "1.0", tk.END)
+                self.text_display.tag_add("sentence_highlight", start_idx, end_idx)
+                
+                # Record the event with position info
+                event_data = {
+                    'text': sentence,
+                    'char_start': prev_period,
+                    'char_end': next_period
+                }
+                self.parent.record_event('sentence_confusion', event_data)
                 self.last_click_label.config(text=f"Last marked: '{sentence[:30]}...' (sentence confusion)")
+                
+                # Remove highlight after 2 seconds
+                self.root.after(2000, lambda: self.text_display.tag_remove("sentence_highlight", "1.0", tk.END))
         except Exception as e:
             print(f"Error processing sentence: {e}")
     
     def on_mouse_motion(self, event):
-        """Track cursor position over text"""
-        current_time = time.time() * 1000
+        """Track cursor position over text with return sweep detection.
         
-        if current_time - self.last_cursor_update < self.cursor_update_interval:
+        OPTIMIZED: Uses pre-calculated word positions to reduce Tkinter calls
+        from 4+ down to 1, making cursor tracking much more responsive.
+        """
+        cursor_x = event.x
+        
+        # Return sweep detection (always runs immediately)
+        # Check if we just made a large leftward jump (return sweep started)
+        if cursor_x < self.last_cursor_x - self.return_sweep_threshold:
+            self.in_return_sweep = True
+        
+        # Exit return sweep on any rightward movement
+        if self.in_return_sweep and cursor_x > self.last_cursor_x:
+            self.in_return_sweep = False
+        
+        self.last_cursor_x = cursor_x
+        
+        # Don't update current word during return sweep
+        if self.in_return_sweep:
             return
         
-        self.last_cursor_update = current_time
-        
+        # FAST word lookup using pre-calculated positions
         try:
+            # Single Tkinter call to get character position
             index = self.text_display.index(f"@{event.x},{event.y}")
-            word_start = self.text_display.index(f"{index} wordstart")
-            word_end = self.text_display.index(f"{index} wordend")
-            word = self.text_display.get(word_start, word_end).strip()
             
-            if word and word != self.current_word:
+            # Parse "line.column" to get character offset (fast string op)
+            col = int(index.split('.')[1])
+            
+            # Binary search for word (pure Python, O(log n), very fast)
+            word_idx = self._find_word_at_char(col)
+            
+            # Only update if we're on a different word
+            if word_idx != self.current_word_index and word_idx >= 0:
+                _, _, word, tk_start, tk_end = self.word_positions[word_idx]
+                
                 self.current_word = word
-                self.word_status.config(text=f"Current word: {word}")
                 self.parent.current_word = word
+                
+                # Update underline: remove old, add new
+                if self.current_word_start and self.current_word_end:
+                    self.text_display.tag_remove("current_word",
+                                                  self.current_word_start,
+                                                  self.current_word_end)
+                
+                self.text_display.tag_add("current_word", tk_start, tk_end)
+                self.current_word_start = tk_start
+                self.current_word_end = tk_end
+                self.current_word_index = word_idx
+                
+                # Update status label
+                self.word_status.config(text=f"Current word: {word}")
         except:
             pass
     
@@ -313,6 +454,14 @@ class TeleprompterWindow:
         self.current_word = ""
         self.parent.current_word = ""
         self.word_status.config(text="Current word: -")
+        # Remove underline efficiently from tracked position
+        if self.current_word_start and self.current_word_end:
+            self.text_display.tag_remove("current_word", 
+                                          self.current_word_start, 
+                                          self.current_word_end)
+        self.current_word_start = None
+        self.current_word_end = None
+        self.current_word_index = -1
     
     def on_key_press(self, event):
         """Handle keyboard events"""
@@ -382,6 +531,15 @@ class TeleprompterWindow:
         self.text_display.yview_moveto(0)
         self.text_status.config(text=f"Text: {self.parent.current_text_index + 1}/{len(TRAINING_TEXTS)}")
         self.last_click_label.config(text="Last marked: -")
+        # Reset current word tracking
+        self.current_word = ""
+        self.parent.current_word = ""
+        self.word_status.config(text="Current word: -")
+        self.current_word_start = None
+        self.current_word_end = None
+        self.current_word_index = -1
+        # Pre-calculate word positions for fast cursor tracking
+        self._build_word_index()
     
     def update_status(self):
         """Update recording and event status"""
@@ -403,7 +561,7 @@ class TeleprompterWindow:
             self.recording_status.config(text="⏺ NOT RECORDING", fg='#888888')
     
     def track_cursor(self):
-        """Track cursor position for word recording"""
+        """Backup cursor tracking (Motion events handle most cases, this is fallback)"""
         if self.active:
             try:
                 x, y = self.text_display.winfo_pointerxy()
@@ -419,7 +577,8 @@ class TeleprompterWindow:
             except:
                 pass
             
-            self.root.after(50, self.track_cursor)
+            # Slower poll since <Motion> events handle most tracking
+            self.root.after(100, self.track_cursor)
     
     def on_close(self):
         """Clean window close"""
@@ -702,90 +861,123 @@ class MuseAthenaVisualizer:
             save_thread.daemon = True
             save_thread.start()
     
-    def record_event(self, event_type, text=""):
-        """Record confusion event with text"""
+    def record_event(self, event_type, event_data):
+        """Record confusion event with structured data"""
         if self.is_recording:
             timestamp = time.time()
             relative_time = timestamp - self.recording_start_time
-            self.recorded_events.append((timestamp, event_type, text))
+            self.recorded_events.append((timestamp, event_type, event_data))
             
             if event_type == 'word_confusion':
-                print(f"🤔 WORD/PHRASE confusion at {relative_time:.2f}s: '{text[:50]}...'")
+                words = event_data.get('words', [])
+                text = event_data.get('text', '')[:50]
+                char_pos = event_data.get('char_start', 0)
+                print(f"🤔 WORD confusion at {relative_time:.2f}s (pos {char_pos}): {words}")
             elif event_type == 'sentence_confusion':
-                print(f"📄 SENTENCE confusion at {relative_time:.2f}s: '{text[:50]}...'")
+                text = event_data.get('text', '')[:50]
+                char_pos = event_data.get('char_start', 0)
+                print(f"📄 SENTENCE confusion at {relative_time:.2f}s (pos {char_pos}): '{text}...'")
     
     def _save_recording_thread(self, save_data):
-        """Save recording data in thread"""
+        """Save recording data in thread (auto-save, no dialog)"""
         try:
-            # Get filename
-            filename = self._get_save_filename()
+            # Auto-generate filename (no dialog - dialogs crash when called from background thread on macOS)
+            save_dir = os.path.expanduser("~/Downloads/EEGRecordings")
+            os.makedirs(save_dir, exist_ok=True)
             
-            if filename:
-                print("Converting data...")
-                
-                # Convert to numpy arrays
-                timestamps = np.array(save_data['timestamps'])
-                eeg_data = np.array(save_data['eeg']) if save_data['eeg'] else np.array([])
-                fnirs_data = np.array(save_data['fnirs']) if save_data['fnirs'] else np.array([])
-                motion_data = np.array(save_data['motion']) if save_data['motion'] else np.array([])
-                ref_data = np.array(save_data['ref']) if save_data['ref'] else np.array([])
-                words_array = np.array(save_data['words'], dtype=object) if save_data['words'] else np.array([], dtype=object)
-                
-                # Events
-                if save_data['events']:
-                    event_timestamps = np.array([e[0] for e in save_data['events']])
-                    event_types = np.array([e[1] for e in save_data['events']])
-                    event_words = np.array([e[2] for e in save_data['events']], dtype=object)
-                else:
-                    event_timestamps = np.array([])
-                    event_types = np.array([])
-                    event_words = np.array([], dtype=object)
-                
-                relative_timestamps = timestamps - timestamps[0] if len(timestamps) > 0 else np.array([])
-                
-                # Metadata
-                metadata = {
-                    'device': 'Muse S Athena',
-                    'start_time': float(save_data['start_time']),
-                    'end_time': float(timestamps[-1] if len(timestamps) > 0 else save_data['start_time']),
-                    'duration': float(timestamps[-1] - timestamps[0] if len(timestamps) > 0 else 0),
-                    'sample_rate': self.sample_rate,
-                    'total_samples': len(timestamps),
-                    'total_events': len(save_data['events']),
-                    'unique_words_tracked': len(set(w for w in save_data['words'] if w)),
-                    'text_passage_index': save_data['current_text_index'],
-                    'text_passage': TRAINING_TEXTS[save_data['current_text_index']],
-                    'eeg_channels': ['TP9', 'AF7', 'AF8', 'TP10'],
-                    'fnirs_channels': ['Ch1_norm', 'Ch2_norm', 'Ch3_norm', 'Ch4_norm', 
-                                     'Ch1_raw', 'Ch2_raw', 'Ch3_raw', 'Ch4_raw'],
-                    'motion_channels': ['acc_x', 'acc_y', 'acc_z', 'gyro_x', 'gyro_y', 'gyro_z'],
-                    'ref_channels': ['DRL', 'REF'],
-                    'event_types': ['word_confusion', 'sentence_confusion', 'marker_1', 'marker_2', 'marker_3']
-                }
-                
-                print("Saving to file...")
-                np.savez_compressed(
-                    filename,
-                    timestamps=timestamps,
-                    relative_timestamps=relative_timestamps,
-                    eeg=eeg_data,
-                    fnirs=fnirs_data,
-                    motion=motion_data,
-                    ref=ref_data,
-                    event_timestamps=event_timestamps,
-                    event_types=event_types,
-                    event_words=event_words,
-                    words=words_array,
-                    metadata=metadata
-                )
-                
-                print(f"\n✅ DATA SAVED: {filename}")
-                print(f"Size: {os.path.getsize(filename) / 1024:.1f} KB")
+            # Create descriptive filename with timestamp and event count
+            timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
+            event_count = len(save_data['events'])
+            duration = int(save_data['timestamps'][-1] - save_data['timestamps'][0]) if save_data['timestamps'] else 0
+            filename = os.path.join(save_dir, f"eeg_confusion_{timestamp_str}_{duration}s_{event_count}events.npz")
+            
+            print(f"\n💾 Auto-saving to: {filename}")
+            print("Converting data...")
+            
+            # Convert to numpy arrays
+            timestamps = np.array(save_data['timestamps'])
+            eeg_data = np.array(save_data['eeg']) if save_data['eeg'] else np.array([])
+            fnirs_data = np.array(save_data['fnirs']) if save_data['fnirs'] else np.array([])
+            motion_data = np.array(save_data['motion']) if save_data['motion'] else np.array([])
+            ref_data = np.array(save_data['ref']) if save_data['ref'] else np.array([])
+            words_array = np.array(save_data['words'], dtype=object) if save_data['words'] else np.array([], dtype=object)
+            
+            # Events - now with structured data
+            if save_data['events']:
+                event_timestamps = np.array([e[0] for e in save_data['events']])
+                event_types = np.array([e[1] for e in save_data['events']])
+                # Store full event data dictionaries (contains text, words, positions)
+                event_data_list = np.array([e[2] for e in save_data['events']], dtype=object)
+                # Also extract just the text for backward compatibility
+                event_texts = np.array([e[2].get('text', '') if isinstance(e[2], dict) else e[2] 
+                                       for e in save_data['events']], dtype=object)
+                # Extract word lists (for word_confusion events)
+                event_words_list = np.array([e[2].get('words', []) if isinstance(e[2], dict) else [] 
+                                            for e in save_data['events']], dtype=object)
+                # Extract character positions for unique identification
+                event_char_starts = np.array([e[2].get('char_start', -1) if isinstance(e[2], dict) else -1 
+                                             for e in save_data['events']])
+                event_char_ends = np.array([e[2].get('char_end', -1) if isinstance(e[2], dict) else -1 
+                                           for e in save_data['events']])
             else:
-                print("Save cancelled")
+                event_timestamps = np.array([])
+                event_types = np.array([])
+                event_data_list = np.array([], dtype=object)
+                event_texts = np.array([], dtype=object)
+                event_words_list = np.array([], dtype=object)
+                event_char_starts = np.array([])
+                event_char_ends = np.array([])
+            
+            relative_timestamps = timestamps - timestamps[0] if len(timestamps) > 0 else np.array([])
+            
+            # Metadata
+            metadata = {
+                'device': 'Muse S Athena',
+                'start_time': float(save_data['start_time']),
+                'end_time': float(timestamps[-1] if len(timestamps) > 0 else save_data['start_time']),
+                'duration': float(timestamps[-1] - timestamps[0] if len(timestamps) > 0 else 0),
+                'sample_rate': self.sample_rate,
+                'total_samples': len(timestamps),
+                'total_events': len(save_data['events']),
+                'unique_words_tracked': len(set(w for w in save_data['words'] if w)),
+                'text_passage_index': save_data['current_text_index'],
+                'text_passage': TRAINING_TEXTS[save_data['current_text_index']],
+                'eeg_channels': ['TP9', 'AF7', 'AF8', 'TP10'],
+                'fnirs_channels': ['Ch1_norm', 'Ch2_norm', 'Ch3_norm', 'Ch4_norm', 
+                                 'Ch1_raw', 'Ch2_raw', 'Ch3_raw', 'Ch4_raw'],
+                'motion_channels': ['acc_x', 'acc_y', 'acc_z', 'gyro_x', 'gyro_y', 'gyro_z'],
+                'ref_channels': ['DRL', 'REF'],
+                'event_types': ['word_confusion', 'sentence_confusion', 'marker_1', 'marker_2', 'marker_3']
+            }
+            
+            print("Saving to file...")
+            np.savez_compressed(
+                filename,
+                timestamps=timestamps,
+                relative_timestamps=relative_timestamps,
+                eeg=eeg_data,
+                fnirs=fnirs_data,
+                motion=motion_data,
+                ref=ref_data,
+                event_timestamps=event_timestamps,
+                event_types=event_types,
+                event_texts=event_texts,
+                event_words_list=event_words_list,
+                event_char_starts=event_char_starts,
+                event_char_ends=event_char_ends,
+                event_data=event_data_list,
+                words=words_array,
+                metadata=metadata
+            )
+            
+            print(f"\n✅ DATA SAVED: {filename}")
+            print(f"📁 Location: {save_dir}")
+            print(f"📊 Size: {os.path.getsize(filename) / 1024:.1f} KB")
         
         except Exception as e:
             print(f"❌ Error saving data: {e}")
+            import traceback
+            traceback.print_exc()
         
         finally:
             if self.record_button:
@@ -794,27 +986,8 @@ class MuseAthenaVisualizer:
                 self.record_button.hovercolor = '#3a3a3a'
                 plt.draw()
     
-    def _get_save_filename(self):
-        """Get save filename with dialog"""
-        root = tk.Tk()
-        root.withdraw()
-        root.lift()
-        root.attributes('-topmost', True)
-        
-        default_name = f"muse_athena_confusion_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        filename = filedialog.asksaveasfilename(
-            parent=root,
-            initialdir=os.path.expanduser("~/Downloads"),
-            initialfile=default_name,
-            defaultextension=".npz",
-            filetypes=[("NumPy Compressed", "*.npz"), ("All files", "*.*")]
-        )
-        
-        root.destroy()
-        return filename
-    
     def save_recording_npz(self, auto_save=False):
-        """Auto-save function for cleanup"""
+        """Auto-save function for cleanup (called on exit if recording)"""
         if len(self.recorded_timestamps) == 0:
             return
         
@@ -831,11 +1004,15 @@ class MuseAthenaVisualizer:
             'current_text_index': self.current_text_index
         }
         
-        # Auto-save
-        default_dir = os.path.expanduser("~/Downloads")
-        os.makedirs(default_dir, exist_ok=True)
-        filename = os.path.join(default_dir, 
-                               f"muse_athena_autosave_{datetime.now().strftime('%Y%m%d_%H%M%S')}.npz")
+        # Auto-save to same directory as regular saves
+        save_dir = os.path.expanduser("~/Downloads/EEGRecordings")
+        os.makedirs(save_dir, exist_ok=True)
+        
+        # Create descriptive filename
+        timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
+        event_count = len(save_data['events'])
+        duration = int(save_data['timestamps'][-1] - save_data['timestamps'][0]) if save_data['timestamps'] else 0
+        filename = os.path.join(save_dir, f"eeg_confusion_AUTOSAVE_{timestamp_str}_{duration}s_{event_count}events.npz")
         
         print(f"Auto-saving to: {filename}")
         
@@ -849,14 +1026,27 @@ class MuseAthenaVisualizer:
             ref_data = np.array(save_data['ref']) if save_data['ref'] else np.array([])
             words_array = np.array(save_data['words'], dtype=object) if save_data['words'] else np.array([], dtype=object)
             
+            # Events - with structured data
             if save_data['events']:
                 event_timestamps = np.array([e[0] for e in save_data['events']])
                 event_types = np.array([e[1] for e in save_data['events']])
-                event_words = np.array([e[2] for e in save_data['events']], dtype=object)
+                event_data_list = np.array([e[2] for e in save_data['events']], dtype=object)
+                event_texts = np.array([e[2].get('text', '') if isinstance(e[2], dict) else e[2] 
+                                       for e in save_data['events']], dtype=object)
+                event_words_list = np.array([e[2].get('words', []) if isinstance(e[2], dict) else [] 
+                                            for e in save_data['events']], dtype=object)
+                event_char_starts = np.array([e[2].get('char_start', -1) if isinstance(e[2], dict) else -1 
+                                             for e in save_data['events']])
+                event_char_ends = np.array([e[2].get('char_end', -1) if isinstance(e[2], dict) else -1 
+                                           for e in save_data['events']])
             else:
                 event_timestamps = np.array([])
                 event_types = np.array([])
-                event_words = np.array([], dtype=object)
+                event_data_list = np.array([], dtype=object)
+                event_texts = np.array([], dtype=object)
+                event_words_list = np.array([], dtype=object)
+                event_char_starts = np.array([])
+                event_char_ends = np.array([])
             
             relative_timestamps = timestamps - timestamps[0] if len(timestamps) > 0 else np.array([])
             
@@ -883,7 +1073,11 @@ class MuseAthenaVisualizer:
                 ref=ref_data,
                 event_timestamps=event_timestamps,
                 event_types=event_types,
-                event_words=event_words,
+                event_texts=event_texts,
+                event_words_list=event_words_list,
+                event_char_starts=event_char_starts,
+                event_char_ends=event_char_ends,
+                event_data=event_data_list,
                 words=words_array,
                 metadata=metadata
             )
@@ -1307,7 +1501,7 @@ class MuseAthenaVisualizer:
         # Setup visualization
         self.setup_visualization()
         
-        # Create teleprompter
+        # Create teleprompter on main thread (required by macOS)
         print("\n🖥️ Opening teleprompter window...")
         self.teleprompter = TeleprompterWindow(self)
         self.teleprompter.update_loop()
@@ -1363,16 +1557,29 @@ class MuseAthenaVisualizer:
         print("\n" + "="*60)
         
         try:
-            # Run both windows
-            def run_teleprompter():
-                if self.teleprompter:
-                    self.teleprompter.root.mainloop()
+            # On macOS, both Tkinter and matplotlib must run on the main thread.
+            # TkAgg backend allows them to share the event loop.
+            # We use plt.show(block=False) and let Tkinter drive updates.
             
-            teleprompter_thread = threading.Thread(target=run_teleprompter)
-            teleprompter_thread.daemon = True
-            teleprompter_thread.start()
+            # Schedule periodic matplotlib canvas updates via Tkinter
+            def update_matplotlib():
+                try:
+                    if self.fig and plt.fignum_exists(self.fig.number):
+                        self.fig.canvas.draw_idle()
+                        self.fig.canvas.flush_events()
+                except:
+                    pass
+                if self.teleprompter and self.teleprompter.active:
+                    self.teleprompter.root.after(40, update_matplotlib)  # ~25 FPS
             
-            plt.show()
+            # Show matplotlib non-blocking
+            plt.show(block=False)
+            
+            # Start matplotlib updates via Tkinter
+            update_matplotlib()
+            
+            # Run Tkinter mainloop (this drives everything on macOS)
+            self.teleprompter.root.mainloop()
         except KeyboardInterrupt:
             print("\nKeyboard interrupt received")
             if self.teleprompter and self.teleprompter.active:

@@ -37,6 +37,7 @@ from sklearn.metrics import classification_report, confusion_matrix, roc_auc_sco
 import matplotlib.pyplot as plt
 from datetime import datetime
 from tqdm.auto import tqdm
+import hashlib
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -48,16 +49,20 @@ CONFIG = {
     # Data settings
     'data_dir': '/content/NewRecordings',  # Colab path
     'sample_rate': 256,  # Hz
-    
+
     # Model architecture - MUST MATCH confusion_rnn.py defaults!
     'model_type': 'lstm',  # 'lstm' or 'gru'
-    'input_size': 12,      # 4 EEG + 8 fNIRS channels
+    'brain_channels': 12,  # 4 EEG + 8 fNIRS channels
     'hidden_size': 64,     # Must match confusion_rnn.py default
     'num_layers': 2,       # Must match confusion_rnn.py default
     'dropout': 0.3,
     'bidirectional': True,
     'use_attention': True,
-    
+
+    # Word embedding settings
+    'use_word_embeddings': True,  # Include word embeddings as features
+    'embedding_dim': 128,          # Dimension for char_hash embeddings
+
     # Training settings
     'window_size_sec': 1.0,    # 1 second windows
     'step_size_sec': 0.125,    # 125ms step (8 predictions/sec)
@@ -66,16 +71,72 @@ CONFIG = {
     'learning_rate': 0.001,
     'weight_decay': 0.01,
     'patience': 15,            # Early stopping patience
-    
+
     # A100 optimizations
     'use_amp': True,           # Mixed precision training
     'num_workers': 4,          # DataLoader workers
     'pin_memory': True,
-    
+
     # Output
     'save_dir': '/content',
     'model_name': 'confusion_rnn_best.pth'
 }
+
+# =============================================================================
+# WORD EMBEDDING UTILITIES
+# =============================================================================
+
+def char_hash_embed(word: str, embedding_dim: int = 128) -> np.ndarray:
+    """
+    Generate deterministic embedding from character hashes.
+    This matches the fallback method in eegTrainer.py WordEmbeddings class.
+    """
+    word_lower = word.lower().strip() if word else ""
+
+    embedding = np.zeros(embedding_dim, dtype=np.float32)
+
+    if not word_lower:
+        return embedding
+
+    # Hash the full word
+    h = hashlib.md5(word_lower.encode()).digest()
+    for i, b in enumerate(h):
+        embedding[i % embedding_dim] += (b - 128) / 128.0
+
+    # Hash character n-grams (captures morphology)
+    for n in [2, 3, 4]:
+        for i in range(len(word_lower) - n + 1):
+            ngram = word_lower[i:i+n]
+            h = hashlib.md5(ngram.encode()).digest()
+            offset = (n - 2) * 16 + 48  # Different region for each n
+            for j, b in enumerate(h):
+                embedding[(offset + j) % embedding_dim] += (b - 128) / 256.0
+
+    # Add word length feature
+    embedding[0] = len(word_lower) / 20.0
+
+    # Normalize
+    norm = np.linalg.norm(embedding)
+    if norm > 0:
+        embedding = embedding / norm
+
+    return embedding
+
+
+def generate_embeddings_for_words(words: np.ndarray, embedding_dim: int = 128) -> np.ndarray:
+    """
+    Generate char_hash embeddings for an array of words.
+    Used when a data file doesn't have pre-computed embeddings.
+    """
+    n_samples = len(words)
+    embeddings = np.zeros((n_samples, embedding_dim), dtype=np.float32)
+
+    for i, word in enumerate(words):
+        word_str = str(word) if word is not None else ""
+        embeddings[i] = char_hash_embed(word_str, embedding_dim)
+
+    return embeddings
+
 
 # =============================================================================
 # MODEL DEFINITIONS
@@ -287,13 +348,15 @@ class ConfusionDataset(Dataset):
     """
     PyTorch Dataset for confusion detection training.
     Creates sliding windows from EEG/fNIRS data with binary confusion labels.
+    Optionally includes word embeddings as additional features.
     """
-    
+
     def __init__(
         self,
         eeg: np.ndarray,
         fnirs: np.ndarray,
         labels: np.ndarray,
+        embeddings: np.ndarray = None,
         window_size: int = 256,
         step_size: int = 32,
         augment: bool = False
@@ -304,16 +367,30 @@ class ConfusionDataset(Dataset):
         self.window_size = window_size
         self.step_size = step_size
         self.augment = augment
-        
+
+        # Handle embeddings - validate they match brain data length
+        self.use_embeddings = False
+        self.embeddings = None
+        self.embedding_dim = 0
+
+        if embeddings is not None:
+            # Validate embeddings array
+            if len(embeddings.shape) == 2 and embeddings.shape[0] == len(eeg) and embeddings.shape[1] > 0:
+                self.embeddings = torch.tensor(embeddings, dtype=torch.float32)
+                self.embedding_dim = embeddings.shape[1]
+                self.use_embeddings = True
+            else:
+                print(f"WARNING: Embeddings shape mismatch. Expected ({len(eeg)}, dim), got {embeddings.shape}. Disabling embeddings.")
+
         self.n_samples = len(eeg)
         self.n_windows = max(0, (self.n_samples - window_size) // step_size + 1)
-        
+
         # Precompute window labels
         self.window_labels = self._compute_window_labels()
-        
+
         # Precompute window indices for faster access
         self.window_starts = torch.arange(0, self.n_windows * step_size, step_size)
-        
+
     def _compute_window_labels(self) -> torch.Tensor:
         window_labels = torch.zeros(self.n_windows, dtype=torch.float32)
         for i in range(self.n_windows):
@@ -321,38 +398,46 @@ class ConfusionDataset(Dataset):
             end = start + self.window_size
             window_labels[i] = float(np.mean(self.labels[start:end]) > 0.5)
         return window_labels
-    
+
     def __len__(self) -> int:
         return self.n_windows
-    
+
     def __getitem__(self, idx: int):
         start = self.window_starts[idx].item()
         end = start + self.window_size
-        
+
         # Extract window
         eeg_window = self.eeg[start:end]
         fnirs_window = self.fnirs[start:end]
-        
-        # Combine channels
+
+        # Combine brain channels
         features = torch.cat([eeg_window, fnirs_window], dim=1)
-        
-        # Remove DC offset per channel
+
+        # Remove DC offset per channel (brain signals only)
         features = features - features.mean(dim=0, keepdim=True)
-        
-        # Data augmentation
+
+        # Add embeddings if available
+        if self.use_embeddings and self.embeddings is not None:
+            embedding_window = self.embeddings[start:end]
+            features = torch.cat([features, embedding_window], dim=1)
+
+        # Data augmentation (only on brain signals, not embeddings)
         if self.augment:
             # Random scaling
             if torch.rand(1).item() < 0.3:
                 scale = 0.9 + 0.2 * torch.rand(1).item()
-                features = features * scale
-            
-            # Add small noise
+                # Only scale brain channels (first 12), not embeddings
+                brain_channels = 12  # 4 EEG + 8 fNIRS
+                features[:, :brain_channels] = features[:, :brain_channels] * scale
+
+            # Add small noise to brain signals only
             if torch.rand(1).item() < 0.3:
-                noise = 0.01 * torch.randn_like(features)
-                features = features + noise
-        
+                brain_channels = 12
+                noise = 0.01 * torch.randn(self.window_size, brain_channels)
+                features[:, :brain_channels] = features[:, :brain_channels] + noise
+
         label = self.window_labels[idx]
-        
+
         return features, torch.tensor([label], dtype=torch.float32)
 
 
@@ -360,46 +445,59 @@ class ConfusionDataset(Dataset):
 # DATA LOADING
 # =============================================================================
 
-def load_all_data(data_dir: str, verbose: bool = True):
+def load_all_data(data_dir: str, use_embeddings: bool = True, embedding_dim: int = 128, verbose: bool = True):
     """
     Load all NPZ files and create unified dataset.
+    Handles word embeddings: loads from file if available, generates via char_hash if not.
+
+    Args:
+        data_dir: Directory containing NPZ files
+        use_embeddings: Whether to load/generate word embeddings
+        embedding_dim: Dimension for generated char_hash embeddings
+        verbose: Print progress information
+
+    Returns:
+        eeg, fnirs, labels, embeddings (or None if use_embeddings=False)
     """
-    files = [f for f in os.listdir(data_dir) 
+    files = [f for f in os.listdir(data_dir)
              if f.endswith('.npz') and not f.endswith('.backup')]
-    
+
     if not files:
         raise ValueError(f"No .npz files found in {data_dir}")
-    
+
     if verbose:
-        print(f"\n📂 Found {len(files)} data files in {data_dir}")
-    
+        print(f"\n[Found] {len(files)} data files in {data_dir}")
+
     all_eeg = []
     all_fnirs = []
     all_labels = []
-    
+    all_embeddings = []
+
     total_samples = 0
     total_confused = 0
-    
+    detected_embedding_dim = None
+    embedding_method = None
+
     for fname in tqdm(files, desc="Loading files"):
         fpath = os.path.join(data_dir, fname)
         data = np.load(fpath, allow_pickle=True)
-        
+
         eeg = data['eeg']
         fnirs = data['fnirs']
-        
+
         # Create confusion labels based on word position overlap
         word_char_starts = data['word_char_starts']
         word_char_ends = data['word_char_ends']
         word_text_indices = data['word_text_indices']
-        
+
         event_types = data['event_types']
         event_char_starts = data['event_char_starts']
         event_char_ends = data['event_char_ends']
         event_text_indices = data['event_text_indices']
-        
+
         # Label samples based on confusion event overlap
         labels = np.zeros(len(eeg), dtype=np.float32)
-        
+
         for evt_type, evt_text_idx, evt_start, evt_end in zip(
             event_types, event_text_indices, event_char_starts, event_char_ends
         ):
@@ -407,37 +505,108 @@ def load_all_data(data_dir: str, verbose: bool = True):
                 same_text = word_text_indices == evt_text_idx
                 overlaps = same_text & (word_char_starts >= evt_start) & (word_char_starts < evt_end)
                 labels[overlaps] = 1.0
-        
+
         # Filter out samples with no word tracking
         valid_mask = word_char_starts >= 0
         eeg_valid = eeg[valid_mask]
         fnirs_valid = fnirs[valid_mask]
         labels_valid = labels[valid_mask]
-        
+
         # Handle NaN values
         fnirs_valid = np.nan_to_num(fnirs_valid, nan=0.0)
         eeg_valid = np.nan_to_num(eeg_valid, nan=0.0)
-        
+
+        # Handle word embeddings
+        embeddings_valid = None
+        file_has_embeddings = False
+
+        if use_embeddings:
+            # Check if file has pre-computed embeddings
+            if 'word_embeddings' in data.files:
+                file_embeddings = data['word_embeddings']
+                # Check if embeddings are valid (not empty and correct shape)
+                if len(file_embeddings) > 0 and len(file_embeddings.shape) == 2 and file_embeddings.shape[0] == len(eeg):
+                    embeddings_valid = file_embeddings[valid_mask]
+                    file_has_embeddings = True
+                    if detected_embedding_dim is None:
+                        detected_embedding_dim = file_embeddings.shape[1]
+                        # Get embedding method from metadata if available
+                        if 'metadata' in data.files:
+                            try:
+                                metadata = data['metadata'].item() if hasattr(data['metadata'], 'item') else data['metadata']
+                                if isinstance(metadata, dict):
+                                    embedding_method = metadata.get('embedding_method', 'unknown')
+                            except:
+                                pass
+
+            # Generate embeddings if file doesn't have them
+            if embeddings_valid is None:
+                # Get words array for generating embeddings
+                if 'words' in data.files:
+                    words = data['words']
+                    # Ensure words array matches eeg length before filtering
+                    if len(words) == len(eeg):
+                        words_valid = words[valid_mask]
+                        # Use detected dim from other files, or default
+                        gen_dim = detected_embedding_dim if detected_embedding_dim else embedding_dim
+                        embeddings_valid = generate_embeddings_for_words(words_valid, gen_dim)
+                        if detected_embedding_dim is None:
+                            detected_embedding_dim = gen_dim
+                        if embedding_method is None:
+                            embedding_method = 'char_hash'
+                    else:
+                        # Words array length mismatch, create zero embeddings
+                        gen_dim = detected_embedding_dim if detected_embedding_dim else embedding_dim
+                        embeddings_valid = np.zeros((len(eeg_valid), gen_dim), dtype=np.float32)
+                        if detected_embedding_dim is None:
+                            detected_embedding_dim = gen_dim
+                else:
+                    # No words available, create zero embeddings
+                    gen_dim = detected_embedding_dim if detected_embedding_dim else embedding_dim
+                    embeddings_valid = np.zeros((len(eeg_valid), gen_dim), dtype=np.float32)
+                    if detected_embedding_dim is None:
+                        detected_embedding_dim = gen_dim
+
+            # Final validation: ensure embeddings match brain data length
+            if embeddings_valid is not None and len(embeddings_valid) != len(eeg_valid):
+                print(f"  WARNING: Embedding length mismatch in {fname}. Creating zero embeddings.")
+                gen_dim = detected_embedding_dim if detected_embedding_dim else embedding_dim
+                embeddings_valid = np.zeros((len(eeg_valid), gen_dim), dtype=np.float32)
+
+            all_embeddings.append(embeddings_valid)
+
         all_eeg.append(eeg_valid)
         all_fnirs.append(fnirs_valid)
         all_labels.append(labels_valid)
-        
+
         n_confused = np.sum(labels_valid)
         total_samples += len(eeg_valid)
         total_confused += n_confused
-        
+
         if verbose:
-            print(f"  {fname}: {len(eeg_valid):,} samples, {int(n_confused):,} confused ({100*n_confused/len(eeg_valid):.1f}%)")
-    
+            emb_info = f", embeddings: {embeddings_valid.shape[1]}d" if embeddings_valid is not None and file_has_embeddings else ""
+            print(f"  {fname}: {len(eeg_valid):,} samples, {int(n_confused):,} confused ({100*n_confused/len(eeg_valid):.1f}%){emb_info}")
+
     # Concatenate all data
     eeg_combined = np.vstack(all_eeg)
     fnirs_combined = np.vstack(all_fnirs)
     labels_combined = np.concatenate(all_labels)
-    
+
+    embeddings_combined = None
+    if use_embeddings and all_embeddings:
+        embeddings_combined = np.vstack(all_embeddings)
+        # Final validation: embeddings must match brain data length
+        if len(embeddings_combined) != len(eeg_combined):
+            print(f"\nERROR: Final embedding length ({len(embeddings_combined)}) != brain data length ({len(eeg_combined)})")
+            print("Disabling embeddings for training.")
+            embeddings_combined = None
+        elif verbose:
+            print(f"\nWord embeddings: {detected_embedding_dim}d ({embedding_method or 'char_hash'})")
+
     if verbose:
-        print(f"\n📊 Total: {total_samples:,} samples, {int(total_confused):,} confused ({100*total_confused/total_samples:.1f}%)")
-    
-    return eeg_combined, fnirs_combined, labels_combined
+        print(f"\n[Total] {total_samples:,} samples, {int(total_confused):,} confused ({100*total_confused/total_samples:.1f}%)")
+
+    return eeg_combined, fnirs_combined, labels_combined, embeddings_combined
 
 
 def normalize_data(eeg: np.ndarray, fnirs: np.ndarray):
@@ -592,62 +761,94 @@ def train_model(config):
     Main training function.
     """
     print("\n" + "="*70)
-    print("🧠 NEUROADAPTIVE READER - CONFUSION DETECTION RNN TRAINING")
+    print("NEUROADAPTIVE READER - CONFUSION DETECTION RNN TRAINING")
     print("="*70)
-    
+
     # Device setup
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"\n🖥️  Device: {device}")
+    print(f"\n[Device] {device}")
     if device.type == 'cuda':
         print(f"   GPU: {torch.cuda.get_device_name(0)}")
         print(f"   Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
-    
+
     # Calculate window/step sizes
     sample_rate = config['sample_rate']
     window_size = int(config['window_size_sec'] * sample_rate)
     step_size = int(config['step_size_sec'] * sample_rate)
-    
-    print(f"\n⚙️  Configuration:")
+
+    # Embedding settings
+    use_embeddings = config.get('use_word_embeddings', False)
+    embedding_dim = config.get('embedding_dim', 128)
+
+    print(f"\n[Configuration]")
     print(f"   Model: {config['model_type'].upper()}")
     print(f"   Hidden size: {config['hidden_size']}")
     print(f"   Layers: {config['num_layers']}")
+    print(f"   Brain channels: {config['brain_channels']}")
+    print(f"   Use word embeddings: {use_embeddings}")
     print(f"   Window: {config['window_size_sec']}s ({window_size} samples)")
     print(f"   Step: {config['step_size_sec']}s ({step_size} samples)")
     print(f"   Batch size: {config['batch_size']}")
     print(f"   Mixed precision: {config['use_amp']}")
-    
+
     # Load data
     print("\n" + "-"*50)
-    print("📥 Loading data...")
-    eeg, fnirs, labels = load_all_data(config['data_dir'])
-    
-    # Normalize
-    print("\n🔄 Normalizing data...")
+    print("[Loading data...]")
+    eeg, fnirs, labels, embeddings = load_all_data(
+        config['data_dir'],
+        use_embeddings=use_embeddings,
+        embedding_dim=embedding_dim
+    )
+
+    # Determine actual embedding dimension from loaded data
+    actual_embedding_dim = 0
+    if use_embeddings and embeddings is not None:
+        actual_embedding_dim = embeddings.shape[1]
+
+    # Calculate total input size
+    brain_channels = config['brain_channels']
+    input_size = brain_channels + actual_embedding_dim
+
+    # Normalize brain signals
+    print("\n[Normalizing data...]")
     eeg_norm, fnirs_norm, norm_stats = normalize_data(eeg, fnirs)
-    
+
     # Split into train/val (temporal split to avoid leakage)
     n_samples = len(eeg_norm)
     split_idx = int(n_samples * 0.8)
-    
+
     eeg_train, eeg_val = eeg_norm[:split_idx], eeg_norm[split_idx:]
     fnirs_train, fnirs_val = fnirs_norm[:split_idx], fnirs_norm[split_idx:]
     labels_train, labels_val = labels[:split_idx], labels[split_idx:]
-    
-    print(f"\n📊 Data split:")
+
+    # Split embeddings if using them
+    embeddings_train, embeddings_val = None, None
+    if use_embeddings and embeddings is not None:
+        embeddings_train = embeddings[:split_idx]
+        embeddings_val = embeddings[split_idx:]
+
+    print(f"\n[Data split]")
     print(f"   Train: {len(eeg_train):,} samples ({100*np.mean(labels_train):.1f}% confused)")
     print(f"   Val:   {len(eeg_val):,} samples ({100*np.mean(labels_val):.1f}% confused)")
-    
+
     # Create datasets
     train_dataset = ConfusionDataset(
         eeg_train, fnirs_train, labels_train,
+        embeddings=embeddings_train,
         window_size=window_size, step_size=step_size, augment=True
     )
     val_dataset = ConfusionDataset(
         eeg_val, fnirs_val, labels_val,
+        embeddings=embeddings_val,
         window_size=window_size, step_size=step_size, augment=False
     )
-    
-    print(f"\n📦 Dataset windows:")
+
+    # Recalculate input_size based on what Dataset actually uses
+    # (Dataset may have disabled embeddings if validation failed)
+    actual_embedding_dim = train_dataset.embedding_dim
+    input_size = brain_channels + actual_embedding_dim
+
+    print(f"\n[Dataset windows]")
     print(f"   Train: {len(train_dataset):,}")
     print(f"   Val:   {len(val_dataset):,}")
     
@@ -673,20 +874,26 @@ def train_model(config):
     
     # Create model
     print("\n" + "-"*50)
-    print("🏗️  Creating model...")
-    
+    print("[Creating model...]")
+
+    # Model config includes embedding information for inference
     model_config = {
         'type': config['model_type'],
-        'input_size': config['input_size'],
+        'input_size': input_size,  # Total: brain_channels + embedding_dim
+        'brain_channels': brain_channels,
+        'embedding_dim': actual_embedding_dim,
+        'use_embeddings': use_embeddings and actual_embedding_dim > 0,
         'hidden_size': config['hidden_size'],
         'num_layers': config['num_layers'],
         'bidirectional': config['bidirectional'],
         'use_attention': config['use_attention']
     }
-    
+
+    print(f"   Input size: {input_size} ({brain_channels} brain + {actual_embedding_dim} embedding)")
+
     if config['model_type'].lower() == 'gru':
         model = ConfusionDetectorGRU(
-            input_size=config['input_size'],
+            input_size=input_size,
             hidden_size=config['hidden_size'],
             num_layers=config['num_layers'],
             dropout=config['dropout'],
@@ -694,16 +901,16 @@ def train_model(config):
         )
     else:
         model = ConfusionDetectorRNN(
-            input_size=config['input_size'],
+            input_size=input_size,
             hidden_size=config['hidden_size'],
             num_layers=config['num_layers'],
             dropout=config['dropout'],
             bidirectional=config['bidirectional'],
             use_attention=config['use_attention']
         )
-    
+
     model = model.to(device)
-    
+
     n_params = sum(p.numel() for p in model.parameters())
     print(f"   Parameters: {n_params:,}")
     
@@ -730,7 +937,7 @@ def train_model(config):
     
     # Training loop
     print("\n" + "-"*50)
-    print("🚀 Training...")
+    print("[Training...]")
     
     history = {
         'train_loss': [], 'train_acc': [],
@@ -743,7 +950,7 @@ def train_model(config):
     epochs_no_improve = 0
     
     for epoch in range(config['epochs']):
-        print(f"\n📈 Epoch {epoch+1}/{config['epochs']}")
+        print(f"\n[Epoch {epoch+1}/{config['epochs']}]")
         
         # Train
         train_loss, train_acc = train_epoch(
@@ -802,21 +1009,21 @@ def train_model(config):
             
             model_path = os.path.join(config['save_dir'], config['model_name'])
             torch.save(checkpoint, model_path)
-            print(f"   ✅ Saved best model (AUC={val_auc:.4f}, F1={val_f1:.4f})")
+            print(f"   * Saved best model (AUC={val_auc:.4f}, F1={val_f1:.4f})")
         else:
             epochs_no_improve += 1
         
         # Early stopping
         if epochs_no_improve >= config['patience']:
-            print(f"\n⏹️  Early stopping at epoch {epoch+1} (no improvement for {config['patience']} epochs)")
+            print(f"\nEarly stopping at epoch {epoch+1} (no improvement for {config['patience']} epochs)")
             break
-    
+
     # Final evaluation
     print("\n" + "="*70)
-    print("📊 FINAL EVALUATION")
+    print("FINAL EVALUATION")
     print("="*70)
-    
-    print(f"\n🏆 Best epoch: {best_epoch}")
+
+    print(f"\nBest epoch: {best_epoch}")
     print(f"   Best AUC: {best_auc:.4f}")
     print(f"   Best F1:  {best_f1:.4f}")
     
@@ -834,11 +1041,11 @@ def train_model(config):
     
     val_preds = (np.array(val_probs) >= 0.5).astype(int)
     
-    print("\n📋 Classification Report:")
-    print(classification_report(val_labels, val_preds, 
+    print("\nClassification Report:")
+    print(classification_report(val_labels, val_preds,
                                target_names=['Not Confused', 'Confused']))
-    
-    print("🔢 Confusion Matrix:")
+
+    print("Confusion Matrix:")
     cm = confusion_matrix(val_labels, val_preds)
     print(f"   TN: {cm[0,0]:,}  FP: {cm[0,1]:,}")
     print(f"   FN: {cm[1,0]:,}  TP: {cm[1,1]:,}")
@@ -883,7 +1090,7 @@ def train_model(config):
     plot_path = os.path.join(config['save_dir'], 'training_history.png')
     plt.savefig(plot_path, dpi=150, bbox_inches='tight')
     plt.show()
-    print(f"\n📈 Saved training plot to {plot_path}")
+    print(f"\nSaved training plot to {plot_path}")
     
     # ROC curve
     from sklearn.metrics import roc_curve
@@ -902,10 +1109,10 @@ def train_model(config):
     plt.show()
     
     print("\n" + "="*70)
-    print("✅ TRAINING COMPLETE!")
+    print("TRAINING COMPLETE!")
     print("="*70)
-    print(f"\n📁 Model saved to: {os.path.join(config['save_dir'], config['model_name'])}")
-    print("\n💡 Download the model file and use it with liveeeg.py for live predictions!")
+    print(f"\nModel saved to: {os.path.join(config['save_dir'], config['model_name'])}")
+    print("\nDownload the model file and use it with liveeeg.py for live predictions!")
     
     return model, history
 
@@ -917,8 +1124,8 @@ def train_model(config):
 if __name__ == "__main__":
     # Check if data directory exists
     if not os.path.exists(CONFIG['data_dir']):
-        print(f"❌ Data directory not found: {CONFIG['data_dir']}")
-        print("\n📤 Please upload your NewRecordings folder to /content/NewRecordings/")
+        print(f"ERROR: Data directory not found: {CONFIG['data_dir']}")
+        print("\nPlease upload your NewRecordings folder to /content/NewRecordings/")
         print("   You can use the Colab file browser or run:")
         print("   !mkdir -p /content/NewRecordings")
         print("   Then upload your .npz files")
